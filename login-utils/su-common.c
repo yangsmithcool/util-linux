@@ -327,6 +327,43 @@ static void setup_parent_signals(struct sigaction *oldact)
     }
 }
 
+static int wait_for_child(pid_t child)
+{
+  pid_t pid;
+  int status;
+
+  for (;;)
+    {
+      pid = waitpid (child, &status, WUNTRACED);
+
+      if (pid != (pid_t)-1 && WIFSTOPPED (status))
+	{
+	  kill (getpid (), SIGSTOP);
+	  /* once we get here, we must have resumed */
+	  kill (pid, SIGCONT);
+	}
+      else
+	break;
+    }
+  if (pid != (pid_t)-1)
+    {
+      if (WIFSIGNALED (status))
+	{
+	  fprintf (stderr, "%s%s\n", strsignal (WTERMSIG (status)),
+		   WCOREDUMP (status) ? _(" (core dumped)") : "");
+	  status = WTERMSIG (status) + 128;
+	}
+      else
+	status = WEXITSTATUS (status);
+    }
+  else if (caught_signal)
+    status = caught_signal + 128;
+  else
+    status = 1;
+
+  return status;
+}
+
 
 static void
 create_watching_parent (void)
@@ -368,37 +405,7 @@ create_watching_parent (void)
   setup_parent_signals(oldact);
 
   if (!caught_signal)
-    {
-      pid_t pid;
-      for (;;)
-	{
-	  pid = waitpid (child, &status, WUNTRACED);
-
-	  if (pid != (pid_t)-1 && WIFSTOPPED (status))
-	    {
-	      kill (getpid (), SIGSTOP);
-	      /* once we get here, we must have resumed */
-	      kill (pid, SIGCONT);
-	    }
-	  else
-	    break;
-	}
-      if (pid != (pid_t)-1)
-        {
-          if (WIFSIGNALED (status))
-            {
-              fprintf (stderr, "%s%s\n", strsignal (WTERMSIG (status)),
-                       WCOREDUMP (status) ? _(" (core dumped)") : "");
-              status = WTERMSIG (status) + 128;
-            }
-          else
-            status = WEXITSTATUS (status);
-        }
-      else if (caught_signal)
-        status = caught_signal + 128;
-      else
-        status = 1;
-    }
+    status = wait_for_child(child);
   else
     status = 1;
 
