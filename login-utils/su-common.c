@@ -276,44 +276,19 @@ export_pamenv (void)
     }
 }
 
-static void
-create_watching_parent (void)
+enum {
+	OLDACT_SIGTERM = 0,
+	OLDACT_SIGINT,
+	OLDACT_SIGQUIT,
+
+	OLDACT_COUNT	/* last */
+};
+
+static void setup_parent_signals(struct sigaction *oldact)
 {
-  pid_t child;
   sigset_t ourset;
-  struct sigaction oldact[3];
-  int status = 0;
-  int retval;
 
-  retval = pam_open_session (pamh, 0);
-  if (is_pam_failure(retval))
-    {
-      cleanup_pam (retval);
-      errx (EXIT_FAILURE, _("cannot open session: %s"),
-	     pam_strerror (pamh, retval));
-    }
-  else
-    _pam_session_opened = 1;
-
-  memset(oldact, 0, sizeof(oldact));
-
-  child = fork ();
-  if (child == (pid_t) -1)
-    {
-      cleanup_pam (PAM_ABORT);
-      err (EXIT_FAILURE, _("cannot create child process"));
-    }
-
-  /* the child proceeds to run the shell */
-  if (child == 0)
-    return;
-
-  /* In the parent watch the child.  */
-
-  /* su without pam support does not have a helper that keeps
-     sitting on any directory so let's go to /.  */
-  if (chdir ("/") != 0)
-    warn (_("cannot change directory to %s"), "/");
+  memset(oldact, 0, sizeof(struct sigaction) * OLDACT_COUNT);
 
   sigfillset (&ourset);
   if (sigprocmask (SIG_BLOCK, &ourset, NULL))
@@ -338,18 +313,60 @@ create_watching_parent (void)
       }
     if (!caught_signal && (sigaddset(&ourset, SIGTERM)
                     || sigaddset(&ourset, SIGALRM)
-                    || sigaction(SIGTERM, &action, &oldact[0])
+                    || sigaction(SIGTERM, &action, &oldact[OLDACT_SIGTERM])
                     || sigprocmask(SIG_UNBLOCK, &ourset, NULL))) {
 	  warn (_("cannot set signal handler"));
 	  caught_signal = true;
 	}
-    if (!caught_signal && !same_session && (sigaction(SIGINT, &action, &oldact[1])
-                                     || sigaction(SIGQUIT, &action, &oldact[2])))
+    if (!caught_signal && !same_session && (sigaction(SIGINT, &action, &oldact[OLDACT_SIGINT])
+                                     || sigaction(SIGQUIT, &action, &oldact[OLDACT_SIGQUIT])))
       {
         warn (_("cannot set signal handler"));
         caught_signal = true;
       }
     }
+}
+
+
+static void
+create_watching_parent (void)
+{
+  pid_t child;
+  struct sigaction oldact[OLDACT_COUNT];
+  int status = 0;
+  int retval;
+
+  retval = pam_open_session (pamh, 0);
+  if (is_pam_failure(retval))
+    {
+      cleanup_pam (retval);
+      errx (EXIT_FAILURE, _("cannot open session: %s"),
+	     pam_strerror (pamh, retval));
+    }
+  else
+    _pam_session_opened = 1;
+
+
+  child = fork ();
+  if (child == (pid_t) -1)
+    {
+      cleanup_pam (PAM_ABORT);
+      err (EXIT_FAILURE, _("cannot create child process"));
+    }
+
+  /* the child proceeds to run the shell */
+  if (child == 0)
+    return;
+
+  /* In the parent watch the child.  */
+
+  /* su without pam support does not have a helper that keeps
+     sitting on any directory so let's go to /.  */
+  if (chdir ("/") != 0)
+    warn (_("cannot change directory to %s"), "/");
+
+  setup_parent_signals(oldact);
+
   if (!caught_signal)
     {
       pid_t pid;
@@ -407,13 +424,13 @@ create_watching_parent (void)
        */
       switch (caught_signal) {
         case SIGTERM:
-          sigaction(SIGTERM, &oldact[0], NULL);
+          sigaction(SIGTERM, &oldact[OLDACT_SIGTERM], NULL);
           break;
         case SIGINT:
-          sigaction(SIGINT, &oldact[1], NULL);
+          sigaction(SIGINT, &oldact[OLDACT_SIGINT], NULL);
           break;
         case SIGQUIT:
-          sigaction(SIGQUIT, &oldact[2], NULL);
+          sigaction(SIGQUIT, &oldact[OLDACT_SIGQUIT], NULL);
           break;
         default:
 	  /* just in case that signal stuff initialization failed and
