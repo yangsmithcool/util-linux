@@ -473,7 +473,13 @@ static void proxy_master_pty(void)
 		if (ret < 0) {
 			if (errsv == EAGAIN && !caught_signal)
 				continue;
-			if (!caught_signal)
+			if (isterm && caught_signal == SIGWINCH) {
+				struct winsize win;
+				ioctl(STDIN_FILENO, TIOCGWINSZ, (char *)&win);
+				ioctl(pty_slave, TIOCSWINSZ, (char *)&win);
+				caught_signal = 0;
+				continue;
+			} else if (!caught_signal)
 				warn(_("poll failed"));
 			break;
 		}
@@ -534,7 +540,7 @@ static void proxy_master_pty(void)
 # define proxy_master_pty
 #endif /* create_pty */
 
-static void setup_parent_signals(struct sigaction *oldact, bool child_wanted)
+static void setup_parent_signals(struct sigaction *oldact, bool use_pty)
 {
   sigset_t ourset;
 
@@ -555,8 +561,10 @@ static void setup_parent_signals(struct sigaction *oldact, bool child_wanted)
       action.sa_flags = 0;
       sigemptyset (&ourset);
 
-      if (child_wanted)
+      if (use_pty) {
 	sigaddset(&ourset, SIGCHLD);
+	sigaddset(&ourset, SIGWINCH);
+      }
 
     if (!same_session)
       {
@@ -580,8 +588,11 @@ static void setup_parent_signals(struct sigaction *oldact, bool child_wanted)
         caught_signal = true;
       }
 
-    if (child_wanted)
-      sigaction(SIGCHLD, &action, NULL);
+    if (use_pty)
+      {
+	sigaction(SIGCHLD, &action, NULL);
+	sigaction(SIGWINCH, &action, NULL);
+      }
     }
 }
 
