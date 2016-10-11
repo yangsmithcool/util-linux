@@ -60,7 +60,12 @@ enum
 #include <syslog.h>
 #include <utmp.h>
 
-#include "err.h"
+#if defined(HAVE_LIBUTIL) && defined(HAVE_PTY_H)
+# include <pty.h>
+# include <poll.h>
+# include "all-io.h"
+# define USE_PTY
+#endif
 
 #include <stdbool.h>
 #include "c.h"
@@ -125,6 +130,34 @@ static pam_handle_t *pamh = NULL;
 
 static int restricted = 1;	/* zero for root user */
 
+static int isterm;	/* isatty() resul */
+
+#ifdef USE_PTY
+struct termios stdin_attrs;   /* stdin and slave terminal runtime attributes */
+int pty_master = -1;
+int pty_slave = -1;
+#endif
+
+#include "debug.h"
+
+UL_DEBUG_DEFINE_MASK(su);
+UL_DEBUG_DEFINE_MASKNAMES(su) = UL_DEBUG_EMPTY_MASKNAMES;
+
+#define SU_DEBUG_INIT	(1 << 1)
+#define SU_DEBUG_POLL	(1 << 2)
+#define SU_DEBUG_SIGNAL	(1 << 3)
+#define SU_DEBUG_IO	(1 << 4)
+#define SU_DEBUG_MISC	(1 << 5)
+#define SU_DEBUG_PTY	(1 << 6)
+#define SU_DEBUG_ALL	0xFFFF
+
+#define DBG(m, x)       __UL_DBG(su, SU_DEBUG_, m, x)
+#define ON_DBG(m, x)    __UL_DBG_CALL(su, SU_DEBUG_, m, x)
+
+static void su_init_debug(void)
+{
+	__UL_INIT_DEBUG(su, SU_DEBUG_, 0, SU_DEBUG);
+}
 
 static struct passwd *
 current_getpwuid(void)
@@ -258,6 +291,7 @@ static void
 su_catch_sig (int sig)
 {
   caught_signal = sig;
+  DBG(SIGNAL, ul_debug("--> catch signal %d", sig));
 }
 
 /* Export env variables declared by PAM modules.  */
@@ -284,10 +318,227 @@ enum {
 	OLDACT_COUNT	/* last */
 };
 
-static void setup_parent_signals(struct sigaction *oldact)
+#ifdef USE_PTY
+static void create_pty(void)
+{
+	struct termios slave_attrs;
+	int rc;
+
+	if (isterm) {
+	        DBG(PTY, ul_debug("create for terminal"));
+		struct winsize win;
+
+		/* original setting of the current terminal */
+		if (tcgetattr(STDIN_FILENO, &stdin_attrs) != 0)
+			err(EXIT_FAILURE, _("failed to get terminal attributes"));
+
+		/* reuse the current terminal setting for slave */
+		slave_attrs = stdin_attrs;
+		cfmakeraw(&slave_attrs);
+
+		ioctl(STDIN_FILENO, TIOCGWINSZ, (char *)&win);
+
+		/* create master+slave */
+		rc = openpty(&pty_master, &pty_slave, NULL, &slave_attrs, &win);
+
+	} else {
+	        DBG(PTY, ul_debug("create for non-terminal"));
+		rc = openpty(&pty_master, &pty_slave, NULL, NULL, NULL);
+
+		/* set slave attributes */
+		tcgetattr(pty_slave, &slave_attrs);
+		cfmakeraw(&slave_attrs);
+		tcsetattr(pty_slave, TCSANOW, &slave_attrs);
+	}
+
+	if (rc < 0)
+	  err(EXIT_FAILURE, _("openpty failed"));
+
+	DBG(PTY, ul_debug("pty setup done [master=%d, slave=%d]", pty_master, pty_slave));
+
+}
+
+static void cleanup_tty(void)
+{
+	if (pty_master == -1)
+		return;
+	DBG(PTY, ul_debug("cleanup"));
+	if (isterm)
+		tcsetattr(STDIN_FILENO, TCSADRAIN, &stdin_attrs);
+}
+
+/* child process tty */
+static void init_slave_pty(void)
+{
+	DBG(PTY, ul_debug("initialize slave"));
+	ioctl(pty_slave, TIOCSCTTY, 1);
+	close(pty_master);
+
+	dup2(pty_slave, STDIN_FILENO);
+	dup2(pty_slave, STDOUT_FILENO);
+	dup2(pty_slave, STDERR_FILENO);
+
+	close(pty_slave);
+
+	pty_slave = -1;
+	pty_master = -1;
+}
+
+static int handle_io(int fd, int *eof)
+{
+	char buf[BUFSIZ];
+	ssize_t bytes;
+
+	*eof = 0;
+	errno = 0;
+
+	DBG(IO, ul_debug("%d FD active", fd));
+
+	/* read from active FD */
+	bytes = read(fd, buf, sizeof(buf));
+	if (bytes < 0) {
+		if (errno == EAGAIN || errno == EINTR)
+			return 0;
+		return -errno;
+	}
+
+	if (bytes == 0) {
+		*eof = 1;
+		return 0;
+	}
+
+	/* from stdin (user) to command */
+	if (fd == STDIN_FILENO) {
+		DBG(IO, ul_debug(" stdin --> master %zd bytes '%s'", bytes, buf));
+	        if (write_all(pty_master, buf, bytes))
+			return -errno;
+
+		/* without sync will write both input &
+		 * shell output that looks like double echoing */
+		fdatasync(pty_master);
+
+	/* from command (master) to stdout */
+	} else if (fd == pty_master) {
+		DBG(IO, ul_debug(" master --> stdout %zd bytes", bytes));
+		write_all(STDOUT_FILENO, buf, bytes);
+	}
+
+	return 0;
+}
+
+static void write_eof_to_shell(void)
+{
+	unsigned int tries = 0;
+	struct pollfd fds[] = {
+	           { .fd = pty_slave, .events = POLLIN }
+	};
+	char c = DEF_EOF;
+
+	DBG(IO, ul_debug(" waiting for empty slave"));
+	while (poll(fds, 1, 10) == 1 && tries < 8) {
+		DBG(IO, ul_debug("   slave is not empty"));
+		xusleep(250000);
+		tries++;
+	}
+	if (tries < 8)
+		DBG(IO, ul_debug("   slave is empty now"));
+
+	DBG(IO, ul_debug(" sending EOF to master"));
+	write_all(pty_master, &c, sizeof(char));
+}
+
+/* parent, copy between child pty and the original terminal */
+static void proxy_master_pty(void)
+{
+	int ignore_stdin = 0, eof = 0;
+	enum {
+		POLLFD_MASTER,
+		POLLFD_STDIN,	/* optional; keep it last, see ignore_stdin */
+
+	};
+	struct pollfd pfd[] = {
+		[POLLFD_MASTER] = { .fd = pty_master,   .events = POLLIN | POLLERR | POLLHUP },
+		[POLLFD_STDIN]	= { .fd = STDIN_FILENO, .events = POLLIN | POLLERR | POLLHUP }
+	};
+
+	while (!caught_signal) {
+		size_t i;
+		int errsv, ret;
+
+		DBG(POLL, ul_debug("calling poll()"));
+
+		ret = poll(pfd, ARRAY_SIZE(pfd) - ignore_stdin, -1);
+		errsv = errno;
+
+		if (ret < 0) {
+			if (errsv == EAGAIN && !caught_signal)
+				continue;
+			if (!caught_signal)
+				warn(_("poll failed"));
+			break;
+		}
+		if (ret == 0) {
+			DBG(POLL, ul_debug("leaving poll() loop"));
+			break;
+		}
+
+		for (i = 0; i < ARRAY_SIZE(pfd) - ignore_stdin; i++) {
+			if (caught_signal)
+				break;
+			if (pfd[i].revents == 0)
+				continue;
+
+			DBG(POLL, ul_debug(" active pfd[%s].fd=%d %s %s %s",
+						i == POLLFD_STDIN  ? "stdin" :
+						i == POLLFD_MASTER ? "master" : "???",
+						pfd[i].fd,
+						pfd[i].revents & POLLIN  ? "POLLIN" : "",
+						pfd[i].revents & POLLHUP ? "POLLHUP" : "",
+						pfd[i].revents & POLLERR ? "POLLERR" : ""));
+
+			switch (i) {
+			case POLLFD_STDIN:
+			case POLLFD_MASTER:
+				/* data */
+				if ((pfd[i].revents & POLLIN)
+				    && handle_io(pfd[i].fd, &eof) < 0)
+					return;
+
+				/* EOF maybe detected by two ways:
+				 *	A) poll() return POLLHUP event after close()
+				 *	B) read() returns 0 (no data) */
+				if ((pfd[i].revents & POLLHUP) || eof) {
+					DBG(POLL, ul_debug(" ignore FD"));
+					pfd[i].fd = -1;
+					/* according to man poll() set FD to -1 can't be used to ignore
+					 * STDIN, so let's remove the FD from pool at all */
+					if (i == POLLFD_STDIN) {
+						ignore_stdin = 1;
+						write_eof_to_shell();
+						DBG(POLL, ul_debug("  ignore STDIN"));
+					}
+				}
+				continue;
+			}
+		}
+	}
+
+	if (caught_signal)
+		DBG(POLL, ul_debug(" poll() exit after signal %d", caught_signal));
+	DBG(POLL, ul_debug("poll() done"));
+}
+#else
+# define create_pty
+# define cleanup_tty
+# define init_slave_pty
+# define proxy_master_pty
+#endif /* create_pty */
+
+static void setup_parent_signals(struct sigaction *oldact, bool child_wanted)
 {
   sigset_t ourset;
 
+  DBG(SIGNAL, ul_debug("initialize parent signals"));
   memset(oldact, 0, sizeof(struct sigaction) * OLDACT_COUNT);
 
   sigfillset (&ourset);
@@ -303,6 +554,10 @@ static void setup_parent_signals(struct sigaction *oldact)
       sigemptyset (&action.sa_mask);
       action.sa_flags = 0;
       sigemptyset (&ourset);
+
+      if (child_wanted)
+	sigaddset(&ourset, SIGCHLD);
+
     if (!same_session)
       {
         if (sigaddset(&ourset, SIGINT) || sigaddset(&ourset, SIGQUIT))
@@ -324,6 +579,9 @@ static void setup_parent_signals(struct sigaction *oldact)
         warn (_("cannot set signal handler"));
         caught_signal = true;
       }
+
+    if (child_wanted)
+      sigaction(SIGCHLD, &action, NULL);
     }
 }
 
@@ -334,6 +592,7 @@ static int wait_for_child(pid_t child)
 
   for (;;)
     {
+      DBG(MISC, ul_debug("waiting for child"));
       pid = waitpid (child, &status, WUNTRACED);
 
       if (pid != (pid_t)-1 && WIFSTOPPED (status))
@@ -366,7 +625,7 @@ static int wait_for_child(pid_t child)
 
 
 static void
-create_watching_parent (void)
+create_watching_parent(bool use_pty)
 {
   pid_t child;
   struct sigaction oldact[OLDACT_COUNT];
@@ -383,17 +642,27 @@ create_watching_parent (void)
   else
     _pam_session_opened = 1;
 
+  if (use_pty)
+    create_pty();
+  fflush(stdout);
 
   child = fork ();
   if (child == (pid_t) -1)
     {
       cleanup_pam (PAM_ABORT);
+      cleanup_tty();
       err (EXIT_FAILURE, _("cannot create child process"));
     }
 
   /* the child proceeds to run the shell */
-  if (child == 0)
+  if (child == 0) {
+      /*
+    sigaction(SIGTERM, &oldact[OLDACT_SIGTERM], NULL);
+    sigaction(SIGINT,  &oldact[OLDACT_SIGINT], NULL);
+    sigaction(SIGQUIT, &oldact[OLDACT_SIGQUIT], NULL);
+    */
     return;
+  }
 
   /* In the parent watch the child.  */
 
@@ -402,10 +671,19 @@ create_watching_parent (void)
   if (chdir ("/") != 0)
     warn (_("cannot change directory to %s"), "/");
 
-  setup_parent_signals(oldact);
+  setup_parent_signals(oldact, use_pty);
 
   if (!caught_signal)
-    status = wait_for_child(child);
+    {
+      if (use_pty) {
+	if (pty_master >= 0)
+	  proxy_master_pty();
+	if (caught_signal == SIGCHLD)
+	  caught_signal = 0;
+      }
+      if (!caught_signal)
+	status = wait_for_child(child);
+    }
   else
     status = 1;
 
@@ -447,6 +725,7 @@ create_watching_parent (void)
       }
       kill(getpid(), caught_signal);
     }
+  cleanup_tty();
   exit (status);
 }
 
@@ -473,7 +752,7 @@ authenticate (const struct passwd *pw)
   if (is_pam_failure(retval))
     goto done;
 
-  if (isatty (0) && (cp = ttyname (0)) != NULL)
+  if (isterm && (cp = ttyname (0)) != NULL)
     {
       const char *tty;
 
@@ -666,6 +945,9 @@ run_shell (char const *shell, char const *command, char **additional_args,
       args[argno++] = "-c";
       args[argno++] = command;
     }
+
+  DBG(MISC, ul_debug("execute shell '%s' command: '%s'", shell, command));
+
   memcpy (args + argno, additional_args, n_additional_args * sizeof *args);
   args[argno + n_additional_args] = NULL;
   execv (shell, (char **) args);
@@ -734,6 +1016,7 @@ usage (int status)
            "                                   and do not create a new session\n"), stdout);
   fputs (_(" -f, --fast                      pass -f to the shell (for csh or tcsh)\n"), stdout);
   fputs (_(" -s, --shell <shell>             run <shell> if /etc/shells allows it\n"), stdout);
+  fputs (_(" -P, --pty                       create pseudo-terminal session\n"), stdout);
 
   fputs(USAGE_SEPARATOR, stdout);
   fputs(USAGE_HELP, stdout);
@@ -807,10 +1090,12 @@ su_main (int argc, char **argv, int mode)
   size_t ngroups = 0;
   bool use_supp = false;
   bool use_gid = false;
+  bool use_pty = false;
   gid_t gid = 0;
 
   static const struct option longopts[] = {
     {"command", required_argument, NULL, 'c'},
+    {"pty", no_argument, NULL, 'P'},
     {"session-command", required_argument, NULL, 'C'},
     {"fast", no_argument, NULL, 'f'},
     {"login", no_argument, NULL, 'l'},
@@ -829,12 +1114,14 @@ su_main (int argc, char **argv, int mode)
   textdomain (PACKAGE);
   atexit(close_stdout);
 
+  su_init_debug();
+
   su_mode = mode;
   fast_startup = false;
   simulate_login = false;
   change_environment = true;
 
-  while ((optc = getopt_long (argc, argv, "c:fg:G:lmps:u:hV", longopts, NULL)) != -1)
+  while ((optc = getopt_long (argc, argv, "c:fg:G:lmpPs:u:hV", longopts, NULL)) != -1)
     {
       switch (optc)
 	{
@@ -868,6 +1155,10 @@ su_main (int argc, char **argv, int mode)
 	case 'm':
 	case 'p':
 	  change_environment = false;
+	  break;
+
+	case 'P':
+	  use_pty = true;
 	  break;
 
 	case 's':
@@ -960,6 +1251,8 @@ su_main (int argc, char **argv, int mode)
   else if (use_gid)
     pw->pw_gid = gid;
 
+  isterm = isatty(STDIN_FILENO);
+
   authenticate (pw);
 
   if (request_same_session || !command || !pw->pw_uid)
@@ -988,12 +1281,16 @@ su_main (int argc, char **argv, int mode)
   if (!simulate_login || command)
     suppress_pam_info = 1;		/* don't print PAM info messages */
 
-  create_watching_parent ();
+  create_watching_parent(use_pty);
+
   /* Now we're in the child.  */
 
   change_identity (pw);
-  if (!same_session)
+  if (!same_session || use_pty)
     setsid ();
+
+  if (use_pty)
+    init_slave_pty();
 
   /* Set environment after pam_open_session, which may put KRB5CCNAME
      into the pam_env, etc.  */
@@ -1006,6 +1303,7 @@ su_main (int argc, char **argv, int mode)
   if (shell)
     run_shell (shell, command, argv + optind, max (0, argc - optind));
   else {
+    DBG(MISC, ul_debug("execute %s", argv[optind]));
     execvp(argv[optind], &argv[optind]);
     err(EXIT_FAILURE, _("failed to execute %s"), argv[optind]);
   }
