@@ -451,6 +451,7 @@ static void write_eof_to_shell(void)
 static void proxy_master_pty(void)
 {
 	int ignore_stdin = 0, eof = 0;
+	int timeout = -1;
 	enum {
 		POLLFD_MASTER,
 		POLLFD_STDIN,	/* optional; keep it last, see ignore_stdin */
@@ -461,20 +462,32 @@ static void proxy_master_pty(void)
 		[POLLFD_STDIN]	= { .fd = STDIN_FILENO, .events = POLLIN | POLLERR | POLLHUP }
 	};
 
-	while (!caught_signal) {
+	while (1) {
 		size_t i;
 		int errsv, ret;
 
 		DBG(POLL, ul_debug("calling poll()"));
 
-		ret = poll(pfd, ARRAY_SIZE(pfd) - ignore_stdin, -1);
+		ret = poll(pfd, ARRAY_SIZE(pfd) - ignore_stdin, timeout);
 		errsv = errno;
+
+		DBG(POLL, ul_debug(" poll rc=%d signal=%d", ret, caught_signal));
+
+		if (caught_signal == SIGCHLD) {
+			/* try read again to be sure we read all from dead child */
+			DBG(POLL, ul_debug(" SIGCHILD re-read"));
+			timeout = 10;
+			caught_signal = 0;
+			if (ret < 0)
+				continue;
+		}
 
 		if (ret < 0) {
 			if (errsv == EAGAIN && !caught_signal)
 				continue;
 			if (isterm && caught_signal == SIGWINCH) {
 				struct winsize win;
+				DBG(POLL, ul_debug(" resize"));
 				ioctl(STDIN_FILENO, TIOCGWINSZ, (char *)&win);
 				ioctl(pty_slave, TIOCSWINSZ, (char *)&win);
 				caught_signal = 0;
@@ -1207,6 +1220,11 @@ su_main (int argc, char **argv, int mode)
     change_environment = true;
   }
 
+  isterm = isatty(STDIN_FILENO);
+  if (!isterm && use_pty)
+    errx(EXIT_FAILURE, _("--pty cannot be used for non-interactive session"));
+
+
   switch (su_mode) {
   case RUNUSER_MODE:
     if (runuser_user) {
@@ -1262,8 +1280,7 @@ su_main (int argc, char **argv, int mode)
   else if (use_gid)
     pw->pw_gid = gid;
 
-  isterm = isatty(STDIN_FILENO);
-
+  
   authenticate (pw);
 
   if (request_same_session || !command || !pw->pw_uid)
