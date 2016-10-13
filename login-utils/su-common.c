@@ -609,70 +609,65 @@ restricted_shell(const char *shell)
 	return true;
 }
 
-static void __attribute__ ((__noreturn__))
-    usage(int status, int mode)
+static void usage_common(FILE *out)
 {
-	if (mode == RUNUSER_MODE) {
-		fputs(USAGE_HEADER, stdout);
-		printf(_(" %s [options] -u <user> <command>\n"),
-		       program_invocation_short_name);
-		printf(_(" %s [options] [-] [<user> [<argument>...]]\n"),
-		       program_invocation_short_name);
-		fputs(_
-		      ("\n"
-		       "Run <command> with the effective user ID and group ID of <user>.  If -u is\n"
-		       "not given, fall back to su(1)-compatible semantics and execute standard shell.\n"
-		       "The options -c, -f, -l, and -s are mutually exclusive with -u.\n"),
-		      stdout);
+	fputs(_(" -m, -p, --preserve-environment  do not reset environment variables\n"), out);
+	fputs(_(" -g, --group <group>             specify the primary group\n"), out);
+	fputs(_(" -G, --supp-group <group>        specify a supplemental group\n\n"), out);
+	fputs(_(" -, -l, --login                  make the shell a login shell\n"), out);
+	fputs(_(" -c, --command <command>         pass a single command to the shell with -c\n"), out);
+	fputs(_(" --session-command <command>     pass a single command to the shell with -c\n"
+	        "                                   and do not create a new session\n"), out);
+	fputs(_(" -f, --fast                      pass -f to the shell (for csh or tcsh)\n"), out);
+	fputs(_(" -s, --shell <shell>             run <shell> if /etc/shells allows it\n"), out);
+}
 
-		fputs(USAGE_OPTIONS, stdout);
+static void __attribute__ ((__noreturn__)) usage_runuser(FILE *out)
+{
+	fputs(USAGE_HEADER, out);
+	fprintf(out,
+		_(" %1$s [options] -u <user> <command>\n"
+	          " %1$s [options] [-] [<user> [<argument>...]]\n"),
+		program_invocation_short_name);
 
-		fputs(_(" -u, --user <user>             username\n"), stdout);
+	fputs(USAGE_SEPARATOR, out);
+	fputs(_("Run <command> with the effective user ID and group ID of <user>.  If -u is\n"
+	       "not given, fall back to su(1)-compatible semantics and execute standard shell.\n"
+	       "The options -c, -f, -l, and -s are mutually exclusive with -u.\n"), out);
 
-	} else {
-		fputs(USAGE_HEADER, stdout);
-		printf(_(" %s [options] [-] [<user> [<argument>...]]\n"),
-		       program_invocation_short_name);
-		fputs(_
-		      ("\n"
-		       "Change the effective user ID and group ID to that of <user>.\n"
-		       "A mere - implies -l.  If <user> is not given, root is assumed.\n"),
-		      stdout);
+	fputs(USAGE_OPTIONS, out);
+	fputs(_(" -u, --user <user>               username\n"), out);
 
-		fputs(USAGE_OPTIONS, stdout);
-	}
+	usage_common(out);
 
-	fputs(_
-	      (" -m, -p, --preserve-environment  do not reset environment variables\n"),
-	      stdout);
-	fputs(_(" -g, --group <group>             specify the primary group\n"),
-	      stdout);
-	fputs(_
-	      (" -G, --supp-group <group>        specify a supplemental group\n\n"),
-	      stdout);
+	fprintf(out, USAGE_MAN_TAIL("runuser(1)"));
+	exit(out == stderr ? EXIT_FAILURE : EXIT_SUCCESS);
+}
 
-	fputs(_
-	      (" -, -l, --login                  make the shell a login shell\n"),
-	      stdout);
-	fputs(_
-	      (" -c, --command <command>         pass a single command to the shell with -c\n"),
-	      stdout);
-	fputs(_
-	      (" --session-command <command>     pass a single command to the shell with -c\n"
-	       "                                   and do not create a new session\n"),
-	      stdout);
-	fputs(_
-	      (" -f, --fast                      pass -f to the shell (for csh or tcsh)\n"),
-	      stdout);
-	fputs(_
-	      (" -s, --shell <shell>             run <shell> if /etc/shells allows it\n"),
-	      stdout);
+static void __attribute__ ((__noreturn__)) usage_su(FILE *out)
+{
+	fputs(USAGE_HEADER, out);
+	fprintf(out,
+		_(" %s [options] [-] [<user> [<argument>...]]\n"),
+		program_invocation_short_name);
 
-	fputs(USAGE_SEPARATOR, stdout);
-	fputs(USAGE_HELP, stdout);
-	fputs(USAGE_VERSION, stdout);
-	printf(USAGE_MAN_TAIL(mode == SU_MODE ? "su(1)" : "runuser(1)"));
-	exit(status);
+	fputs(USAGE_SEPARATOR, out);
+	fputs(_("Change the effective user ID and group ID to that of <user>.\n"
+		"A mere - implies -l.  If <user> is not given, root is assumed.\n"), out);
+
+	fputs(USAGE_OPTIONS, out);
+	usage_common(out);
+
+	fprintf(out, USAGE_MAN_TAIL("su(1)"));
+	exit(out == stderr ? EXIT_FAILURE : EXIT_SUCCESS);
+}
+
+static void usage(int mode, FILE *out)
+{
+	if (mode == SU_MODE)
+		usage_su(out);
+	else
+		usage_runuser(out);
 }
 
 static void load_config(void *data)
@@ -806,19 +801,19 @@ su_main(int argc, char **argv, int mode)
 
 		case 'u':
 			if (!su->runuser)
-				usage(mode, EXIT_FAILURE);
+				usage(mode, stderr);
 			runuser_user = optarg;
 			break;
 
 		case 'h':
-			usage(mode, 0);
+			usage(mode, stdout);
 
 		case 'V':
 			printf(UTIL_LINUX_VERSION);
 			exit(EXIT_SUCCESS);
 
 		default:
-			usage(mode, EXIT_FAILURE);
+			usage(mode, stderr);
 		}
 	}
 
