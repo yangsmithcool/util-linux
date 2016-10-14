@@ -16,6 +16,7 @@ libcommon_la_SOURCES = \
 	lib/md5.c \
 	lib/pager.c \
 	lib/path.c \
+	lib/pwdutils.c \
 	lib/randutils.c \
 	lib/setproctitle.c \
 	lib/strutils.c \
@@ -61,6 +62,7 @@ check_PROGRAMS += \
 	test_colors \
 	test_fileutils \
 	test_ismounted \
+	test_pwdutils \
 	test_mangle \
 	test_randutils \
 	test_strutils \
@@ -132,3 +134,6 @@ test_canonicalize_CFLAGS = $(AM_CFLAGS) -DTEST_PROGRAM_CANONICALIZE
 
 test_timeutils_SOURCES = lib/timeutils.c lib/strutils.c
 test_timeutils_CFLAGS = $(AM_CFLAGS) -DTEST_PROGRAM_TIMEUTILS
+
+test_pwdutils_SOURCES = lib/pwdutils.c
+test_pwdutils_CFLAGS = $(AM_CFLAGS) -DTEST_PROGRAM
