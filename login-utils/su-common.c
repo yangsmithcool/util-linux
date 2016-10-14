@@ -91,7 +91,11 @@ struct su_context {
 	const char	*tty_name;		/* tty_path without /dev prefix */
 	const char	*tty_number;		/* end of the tty_path */
 
+	char		*new_user;		/* wanted user */
+	char		*old_user;		/* orginal user */
+
 	unsigned int runuser :1,		/* flase=su, true=runuser */
+		     runuser_uopt :1,		/* runuser -u specified */
 		     isterm :1,			/* is stdin terminal? */
 		     fast_startup :1,		/* pass the `-f' option to the subshell. */
 		     simulate_login :1,		/* simulate a login instead of just starting a shell. */
@@ -115,27 +119,6 @@ su_catch_sig(int sig)
 	caught_signal = sig;
 }
 
-
-static struct passwd *
-current_getpwuid(void)
-{
-	uid_t ruid;
-
-	/* GNU Hurd implementation has an extension where a process can exist in a
-	 * non-conforming environment, and thus be outside the realms of POSIX
-	 * process identifiers; on this platform, getuid() fails with a status of
-	 * (uid_t)(-1) and sets errno if a program is run from a non-conforming
-	 * environment.
-	 *
-	 * http://austingroupbugs.net/view.php?id=511
-	 */
-	errno = 0;
-	ruid = getuid();
-
-	return errno == 0 ? getpwuid(ruid) : NULL;
-}
-
-
 static void init_tty(struct su_context *su)
 {
 	su->isterm = isatty(STDIN_FILENO) ? 1 : 0;
@@ -148,24 +131,11 @@ static void init_tty(struct su_context *su)
 
 static void log_syslog(struct su_context *su, bool successful)
 {
-	const char *new_user = su->pwd->pw_name,
-		   *old_user;
-
-	/* The utmp entry (via getlogin) is probably the best way to identify
-	 * the user, especially if someone su's from a su-shell.
-	 */
-	old_user = getlogin();
-	if (!old_user) {
-		/* probably lack of utmp entry; resort to getpwuid. */
-		struct passwd *pwd = current_getpwuid();
-		old_user = pwd ? pwd->pw_name : "";
-	}
-
 	openlog(program_invocation_short_name, 0, LOG_AUTH);
 	syslog(LOG_NOTICE, "%s(to %s) %s on %s",
 	       successful ? "" :
 	       su->runuser ? "FAILED RUNUSER " : "FAILED SU ",
-	       new_user, old_user,
+	       su->new_user, su->old_user ? : "",
 	       su->tty_name ? : "none");
 	closelog();
 }
@@ -251,7 +221,6 @@ static void supam_export_environment(struct su_context *su)
 
 static void supam_authenticate(struct su_context *su)
 {
-	const struct passwd *lpw = NULL;
 	const char *srvname = NULL;
 	int retval;
 
@@ -268,14 +237,11 @@ static void supam_authenticate(struct su_context *su)
 		if (is_pam_failure(retval))
 			goto done;
 	}
-
-	lpw = current_getpwuid();
-	if (lpw && lpw->pw_name) {
-		retval = pam_set_item(su->pamh, PAM_RUSER, (const void *)lpw->pw_name);
+	if (su->old_user) {
+		retval = pam_set_item(su->pamh, PAM_RUSER, (const void *) su->old_user);
 		if (is_pam_failure(retval))
 			goto done;
 	}
-
 	if (su->runuser) {
 		/*
 		 * This is the only difference between runuser(1) and su(1). The command
@@ -721,11 +687,11 @@ su_main(int argc, char **argv, int mode)
 	struct su_context _su = {
 		.conv			= { supam_conv, NULL },
 		.runuser		= (mode == RUNUSER_MODE ? 1 : 0),
-		.change_environment	= 1
+		.change_environment	= 1,
+		.new_user		= DEFAULT_USER
 	}, *su = &_su;
 
 	int optc;
-	const char *new_user = DEFAULT_USER, *runuser_user = NULL;
 	char *command = NULL;
 	int request_same_session = 0;
 	char *shell = NULL;
@@ -801,7 +767,8 @@ su_main(int argc, char **argv, int mode)
 		case 'u':
 			if (!su->runuser)
 				usage(mode, stderr);
-			runuser_user = optarg;
+			su->runuser_uopt = 1;
+			su->new_user = optarg;
 			break;
 
 		case 'h':
@@ -831,19 +798,14 @@ su_main(int argc, char **argv, int mode)
 
 	switch (mode) {
 	case RUNUSER_MODE:
-		if (runuser_user) {
-			/* runuser -u <user> <command> */
-			new_user = runuser_user;
-			if (shell || su->fast_startup || command || su->simulate_login) {
+		/* runuser -u <user> <command> */
+		if (su->runuser_uopt) {
+			if (shell || su->fast_startup || command || su->simulate_login)
 				errx(EXIT_FAILURE,
-				     _
-				     ("options --{shell,fast,command,session-command,login} and "
+				     _("options --{shell,fast,command,session-command,login} and "
 				      "--user are mutually exclusive"));
-			}
 			if (optind == argc)
-				errx(EXIT_FAILURE,
-				     _("no command was specified"));
-
+				errx(EXIT_FAILURE, _("no command was specified"));
 			break;
 		}
 		/* fallthrough if -u <user> is not specified, then follow
@@ -851,7 +813,7 @@ su_main(int argc, char **argv, int mode)
 		 */
 	case SU_MODE:
 		if (optind < argc)
-			new_user = argv[optind++];
+			su->new_user = argv[optind++];
 		break;
 	}
 
@@ -862,12 +824,15 @@ su_main(int argc, char **argv, int mode)
 	logindefs_set_loader(load_config, (void *) su);
 	init_tty(su);
 
-	su->pwd = xgetpwnam(new_user, &su->pwdbuf);
+	su->pwd = xgetpwnam(su->new_user, &su->pwdbuf);
 	if (!su->pwd
 	    || !su->pwd->pw_passwd
 	    || !su->pwd->pw_name || !*su->pwd->pw_name
 	    || !su->pwd->pw_dir  || !*su->pwd->pw_dir)
-		errx(EXIT_FAILURE, _("user %s does not exist"), new_user);
+		errx(EXIT_FAILURE, _("user %s does not exist"), su->new_user);
+
+	su->new_user = su->pwd->pw_name;
+	su->old_user = xgetlogin();
 
 	if (!su->pwd->pw_shell || !*su->pwd->pw_shell)
 		su->pwd->pw_shell = DEFAULT_SHELL;
@@ -883,7 +848,7 @@ su_main(int argc, char **argv, int mode)
 		su->same_session = 1;
 
 	/* initialize shell variable only if "-u <user>" not specified */
-	if (runuser_user) {
+	if (su->runuser_uopt) {
 		shell = NULL;
 	} else {
 		if (!shell && !su->change_environment)
