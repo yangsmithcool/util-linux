@@ -307,7 +307,7 @@ static struct dirent *xreaddir(DIR *dp)
 
 int sysfs_is_partition_dirent(DIR *dir, struct dirent *d, const char *parent_name)
 {
-	char path[256];
+	char path[NAME_MAX + 6 + 1];
 
 #ifdef _DIRENT_HAVE_D_TYPE
 	if (d->d_type != DT_DIR &&
@@ -356,7 +356,7 @@ dev_t sysfs_partno_to_devno(struct sysfs_cxt *cxt, int partno)
 {
 	DIR *dir;
 	struct dirent *d;
-	char path[256];
+	char path[NAME_MAX + 10 + 1];
 	dev_t devno = 0;
 
 	dir = sysfs_opendir(cxt, NULL);
@@ -833,31 +833,35 @@ err:
 }
 
 /*
- * Returns 1 if the device is private LVM device.
+ * Returns 1 if the device is private LVM device. The @uuid (if not NULL)
+ * returns DM device UUID, use free() to deallocate.
  */
-int sysfs_devno_is_lvm_private(dev_t devno)
+int sysfs_devno_is_lvm_private(dev_t devno, char **uuid)
 {
 	struct sysfs_cxt cxt = UL_SYSFSCXT_EMPTY;
-	char *uuid = NULL;
+	char *id = NULL;
 	int rc = 0;
 
 	if (sysfs_init(&cxt, devno, NULL) != 0)
 		return 0;
 
-	uuid = sysfs_strdup(&cxt, "dm/uuid");
+	id = sysfs_strdup(&cxt, "dm/uuid");
 
 	/* Private LVM devices use "LVM-<uuid>-<name>" uuid format (important
 	 * is the "LVM" prefix and "-<name>" postfix).
 	 */
-	if (uuid && strncmp(uuid, "LVM-", 4) == 0) {
-		char *p = strrchr(uuid + 4, '-');
+	if (id && strncmp(id, "LVM-", 4) == 0) {
+		char *p = strrchr(id + 4, '-');
 
 		if (p && *(p + 1))
 			rc = 1;
 	}
 
 	sysfs_deinit(&cxt);
-	free(uuid);
+	if (uuid)
+		*uuid = id;
+	else
+		free(id);
 	return rc;
 }
 

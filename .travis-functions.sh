@@ -17,8 +17,15 @@ MAKE="make -j2"
 DUMP_CONFIG_LOG="short"
 export TS_OPT_parsable="yes"
 
+# workaround ugly warning on travis OSX,
+# see https://github.com/direnv/direnv/issues/210
+shell_session_update() { :; }
+
 function xconfigure
 {
+	which "$CC"
+	"$CC" --version
+
 	./configure "$@" $OSX_CONFOPTS
 	err=$?
 	if [ "$DUMP_CONFIG_LOG" = "short" ]; then
@@ -29,18 +36,32 @@ function xconfigure
 	return $err
 }
 
+# TODO: integrate checkusage into our regular tests and remove this function
+function make_checkusage
+{
+	local tmp
+	if ! tmp=$($MAKE checkusage 2>&1) || test -n "$tmp"; then
+		echo "$tmp"
+		echo "make checkusage failed" >&2
+		return 1
+	fi
+}
+
 function check_nonroot
 {
 	local opts="$MAKE_CHECK_OPTS --show-diff"
 
 	xconfigure \
 		--disable-use-tty-group \
+		--disable-makeinstall-chown \
 		--enable-all-programs \
 		|| return
 	$MAKE || return
 
 	osx_prepare_check
 	$MAKE check TS_OPTS="$opts" || return
+
+	make_checkusage || return
 
 	$MAKE install DESTDIR=/tmp/dest || return
 }
@@ -58,7 +79,8 @@ function check_root
 	osx_prepare_check
 	sudo -E $MAKE check TS_OPTS="$opts" || return
 
-	sudo $MAKE install || return
+	# keep PATH to make sure sudo would find $CC
+	sudo env "PATH=$PATH" $MAKE install || return
 }
 
 function check_dist
@@ -75,8 +97,8 @@ function travis_install_script
 		return
 	fi
 
-	# install some packages from Ubuntu's default sources
-	sudo apt-get -qq update
+	# install required packages
+	sudo apt-get -qq update --fix-missing
 	sudo apt-get install -qq >/dev/null \
 		bc \
 		btrfs-tools \
@@ -125,7 +147,7 @@ function osx_prepare_check
 
 	# symlink minimally needed gnu commands into PATH
 	mkdir ~/bin
-	for cmd in readlink seq truncate find xargs tar sed; do
+	for cmd in readlink seq timeout truncate find xargs tar sed; do
 		ln -s /usr/local/bin/g$cmd $HOME/bin/$cmd
 	done
 	hash -r

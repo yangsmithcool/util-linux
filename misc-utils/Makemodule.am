@@ -2,8 +2,18 @@ if BUILD_CAL
 usrbin_exec_PROGRAMS += cal
 dist_man_MANS += misc-utils/cal.1
 cal_SOURCES = misc-utils/cal.c
-cal_CFLAGS = $(AM_CFLAGS) $(NCURSES_CFLAGS)
-cal_LDADD = $(LDADD) libcommon.la libtcolors.la $(NCURSES_LIBS)
+cal_CFLAGS = $(AM_CFLAGS)
+cal_LDADD = $(LDADD) libcommon.la libtcolors.la
+# tinfo or ncurses are optional
+if HAVE_TINFO
+cal_LDADD += $(TINFO_LIBS)
+cal_CFLAGS += $(TINFO_CFLAGS)
+else
+if HAVE_NCURSES
+cal_LDADD += $(NCURSES_LIBS)
+cal_CFLAGS += $(NCURSES_CFLAGS)
+endif
+endif # !HAVE_TINFO
 endif # BUILD_CAL
 
 
@@ -78,6 +88,14 @@ uuidgen_LDADD = $(LDADD) libuuid.la
 uuidgen_CFLAGS = $(AM_CFLAGS) -I$(ul_libuuid_incdir)
 endif
 
+if BUILD_UUIDPARSE
+usrbin_exec_PROGRAMS += uuidparse
+dist_man_MANS += misc-utils/uuidparse.1
+uuidparse_SOURCES = misc-utils/uuidparse.c
+uuidparse_LDADD = $(LDADD) libcommon.la libuuid.la libsmartcols.la
+uuidparse_CFLAGS = $(AM_CFLAGS) -I$(ul_libuuid_incdir) -I$(ul_libsmartcols_incdir)
+endif
+
 if BUILD_UUIDD
 usrsbin_exec_PROGRAMS += uuidd
 dist_man_MANS += misc-utils/uuidd.8
@@ -134,8 +152,8 @@ if BUILD_WIPEFS
 sbin_PROGRAMS += wipefs
 dist_man_MANS += misc-utils/wipefs.8
 wipefs_SOURCES = misc-utils/wipefs.c
-wipefs_LDADD = $(LDADD) libblkid.la libcommon.la
-wipefs_CFLAGS = $(AM_CFLAGS) -I$(ul_libblkid_incdir)
+wipefs_LDADD = $(LDADD) libblkid.la libcommon.la libsmartcols.la
+wipefs_CFLAGS = $(AM_CFLAGS) -I$(ul_libblkid_incdir) -I$(ul_libsmartcols_incdir)
 endif
 
 if BUILD_FINDMNT

@@ -52,6 +52,7 @@
 #include "ttyutils.h"
 #include "strv.h"
 #include "optutils.h"
+#include "mbsalign.h"
 
 #include "libsmartcols.h"
 
@@ -92,7 +93,9 @@ struct column_control {
 	size_t	maxlength;	/* longest input record (line) */
 
 	unsigned int greedy :1,
-		     json :1;
+		     json :1,
+		     header_repeat :1,
+		     tab_noheadings :1;
 };
 
 static size_t width(const wchar_t *str)
@@ -129,7 +132,7 @@ static wchar_t *mbs_to_wcs(const char *s)
 	}
 	return wcs;
 #else
-	return xstrdup(s)
+	return xstrdup(s);
 #endif
 }
 
@@ -150,7 +153,7 @@ static char *wcs_to_mbs(const wchar_t *s)
 	}
 	return str;
 #else
-	return xstrdup(s)
+	return xstrdup(s);
 #endif
 }
 
@@ -159,14 +162,22 @@ static wchar_t *local_wcstok(wchar_t *p, const wchar_t *separator, int greedy, w
 	wchar_t *result = NULL;
 
 	if (greedy)
+#ifdef HAVE_WIDECHAR
 		return wcstok(p, separator, state);
+#else
+		return strtok_r(p, separator, state);
+#endif
 	if (!p) {
 		if (!*state || !**state)
 			return NULL;
 		p = *state;
 	}
 	result = p;
+#ifdef HAVE_WIDECHAR
 	p = wcspbrk(result, separator);
+#else
+	p = strpbrk(result, separator);
+#endif
 	if (!p)
 		*state = NULL;
 	else {
@@ -199,12 +210,17 @@ static void init_table(struct column_control *ctl)
 	if (ctl->json) {
 		scols_table_enable_json(ctl->tab, 1);
 		scols_table_set_name(ctl->tab, ctl->tab_name ? : "table");
-	}
+	} else
+		scols_table_enable_noencoding(ctl->tab, 1);
+
 	if (ctl->tab_colnames) {
 		char **name;
 
 		STRV_FOREACH(name, ctl->tab_colnames)
 			scols_table_new_column(ctl->tab, *name, 0, 0);
+		if (ctl->header_repeat)
+			scols_table_enable_header_repeat(ctl->tab, 1);
+		scols_table_enable_noheadings(ctl->tab, !!ctl->tab_noheadings);
 	} else
 		scols_table_enable_noheadings(ctl->tab, 1);
 }
@@ -261,13 +277,38 @@ static void apply_columnflag_from_list(struct column_control *ctl, const char *l
 {
 	char **all = split_or_error(list, errmsg);
 	char **one;
+	int unnamed = 0;
 
 	STRV_FOREACH(one, all) {
-		struct libscols_column *cl = string_to_column(ctl, *one);
+		struct libscols_column *cl;
+
+		if (flag == SCOLS_FL_HIDDEN && strcmp(*one, "-") == 0) {
+			unnamed = 1;
+			continue;
+		}
+		cl = string_to_column(ctl, *one);
 		if (cl)
 			column_set_flag(cl, flag);
 	}
 	strv_free(all);
+
+	/* apply flag to all columns without name */
+	if (unnamed) {
+		struct libscols_iter *itr;
+		struct libscols_column *cl;
+
+		itr = scols_new_iter(SCOLS_ITER_FORWARD);
+		if (!itr)
+			err_oom();
+
+		while (scols_table_next_column(ctl->tab, itr, &cl) == 0) {
+			struct libscols_cell *ce = scols_column_get_header(cl);
+
+			if (ce == NULL ||  scols_cell_get_data(ce) == NULL)
+				column_set_flag(cl, flag);
+		}
+		scols_free_iter(itr);
+	}
 }
 
 static void reorder_table(struct column_control *ctl)
@@ -445,8 +486,18 @@ static int read_input(struct column_control *ctl, FILE *fp)
 			continue;
 
 		wcs = mbs_to_wcs(str);
-		if (!wcs)
-			err(EXIT_FAILURE, _("read failed"));
+		if (!wcs) {
+			/*
+			 * Convert broken sequences to \x<hex> and continue.
+			 */
+			size_t tmpsz = 0;
+			char *tmp = mbs_invalid_encode(str, &tmpsz);
+
+			if (!tmp)
+				err(EXIT_FAILURE, _("read failed"));
+			wcs = mbs_to_wcs(tmp);
+			free(tmp);
+		}
 
 		switch (ctl->mode) {
 		case COLUMN_MODE_TABLE:
@@ -482,7 +533,7 @@ static void columnate_fillrows(struct column_control *ctl)
 	ctl->maxlength = (ctl->maxlength + TABCHAR_CELLS) & ~(TABCHAR_CELLS - 1);
 	numcols = ctl->termwidth / ctl->maxlength;
 	endcol = ctl->maxlength;
-	for (chcnt = col = 0, lp = ctl->ents;; ++lp) {
+	for (chcnt = col = 0, lp = ctl->ents; /* nothing */; ++lp) {
 		fputws(*lp, stdout);
 		chcnt += width(*lp);
 		if (!--ctl->nents)
@@ -543,9 +594,9 @@ static void simple_print(struct column_control *ctl)
 	}
 }
 
-static void __attribute__((__noreturn__)) usage(int rc)
+static void __attribute__((__noreturn__)) usage(void)
 {
-	FILE *out = rc == EXIT_FAILURE ? stderr : stdout;
+	FILE *out = stdout;
 
 	fputs(USAGE_HEADER, out);
 	fprintf(out, _(" %s [options] [<file>...]\n"), program_invocation_short_name);
@@ -559,6 +610,8 @@ static void __attribute__((__noreturn__)) usage(int rc)
 	fputs(_(" -O, --table-order <columns>      specify order of output columns\n"), out);
 	fputs(_(" -N, --table-columns <names>      comma separated columns names\n"), out);
 	fputs(_(" -E, --table-noextreme <columns>  don't count long text from the columns to column width\n"), out);
+	fputs(_(" -d, --table-noheadings           don't print header\n"), out);
+	fputs(_(" -e, --table-header-repeat        repeat header for each page\n"), out);
 	fputs(_(" -H, --table-hide <columns>       don't print the columns\n"), out);
 	fputs(_(" -R, --table-right <columns>      right align text in these columns\n"), out);
 	fputs(_(" -T, --table-truncate <columns>   truncate text in the columns when necessary\n"), out);
@@ -576,12 +629,12 @@ static void __attribute__((__noreturn__)) usage(int rc)
 	fputs(_(" -s, --separator <string>         possible table delimiters\n"), out);
 	fputs(_(" -x, --fillrows                   fill rows before columns\n"), out);
 
-	fputs(USAGE_SEPARATOR, out);
-	fputs(USAGE_HELP, out);
-	fputs(USAGE_VERSION, out);
-	fprintf(out, USAGE_MAN_TAIL("column(1)"));
 
-	exit(rc);
+	fputs(USAGE_SEPARATOR, out);
+	printf(USAGE_HELP_OPTIONS(34));
+	printf(USAGE_MAN_TAIL("column(1)"));
+
+	exit(EXIT_SUCCESS);
 }
 
 int main(int argc, char **argv)
@@ -609,10 +662,12 @@ int main(int argc, char **argv)
 		{ "table-hide",          required_argument, NULL, 'H' },
 		{ "table-name",          required_argument, NULL, 'n' },
 		{ "table-noextreme",     required_argument, NULL, 'E' },
+		{ "table-noheadings",    no_argument,       NULL, 'd' },
 		{ "table-order",         required_argument, NULL, 'O' },
 		{ "table-right",         required_argument, NULL, 'R' },
 		{ "table-truncate",      required_argument, NULL, 'T' },
 		{ "table-wrap",          required_argument, NULL, 'W' },
+		{ "table-header-repeat", no_argument,       NULL, 'e' },
 		{ "tree",                required_argument, NULL, 'r' },
 		{ "tree-id",             required_argument, NULL, 'i' },
 		{ "tree-parent",         required_argument, NULL, 'p' },
@@ -634,7 +689,7 @@ int main(int argc, char **argv)
 	ctl.output_separator = "  ";
 	ctl.input_separator = mbs_to_wcs("\t ");
 
-	while ((c = getopt_long(argc, argv, "c:E:H:hi:JN:n:O:o:p:R:r:s:T:tVW:x", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "c:dE:eH:hi:JN:n:O:o:p:R:r:s:T:tVW:x", longopts, NULL)) != -1) {
 
 		err_exclusive_options(c, longopts, excl, excl_st);
 
@@ -642,14 +697,20 @@ int main(int argc, char **argv)
 		case 'c':
 			ctl.termwidth = strtou32_or_err(optarg, _("invalid columns argument"));
 			break;
+		case 'd':
+			ctl.tab_noheadings = 1;
+			break;
 		case 'E':
 			ctl.tab_colnoextrem = optarg;
+			break;
+		case 'e':
+			ctl.header_repeat = 1;
 			break;
 		case 'H':
 			ctl.tab_colhide = optarg;
 			break;
 		case 'h':
-			usage(EXIT_SUCCESS);
+			usage();
 			break;
 		case 'i':
 			ctl.tree_id = optarg;

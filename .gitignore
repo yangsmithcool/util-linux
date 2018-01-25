@@ -140,6 +140,7 @@ ylwrap
 /renice
 /resizepart
 /rev
+/rfkill
 /rtcwake
 /runuser
 /sample-*
@@ -165,6 +166,7 @@ ylwrap
 /utmpdump
 /uuidd
 /uuidgen
+/uuidparse
 /vipw
 /wall
 /wdctl

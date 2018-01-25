@@ -75,9 +75,17 @@ This option is only supported on systems where /etc/mtab is a symlink
 to /proc/mounts.
 .TP
 .BR \-c , " \-\-no\-canonicalize"
-Do not canonicalize paths.  For more details about this option see the
+Do not canonicalize paths.  The paths canonicalization is based on
+.BR stat (2)
+and
+.BR readlink (2)
+system calls. These system calls may hang in some cases (for example on NFS if
+server is not available). The option has to be used with canonical path to the
+mount point.
+
+For more details about this option see the
 .BR mount (8)
-man page.  Note that \fBumount\fR does not pass this option to the
+man page. Note that \fBumount\fR does not pass this option to the
 .BI /sbin/umount. type
 helpers.
 .TP
@@ -97,8 +105,7 @@ that were unmounted earlier with the
 option.
 .TP
 .BR \-f , " \-\-force"
-Force an unmount (in case of an unreachable NFS system).  (Requires kernel
-2.1.116 or later.)
+Force an unmount (in case of an unreachable NFS system).
 
 Note that this option does not guarantee that umount command does not hang.
 It's strongly recommended to use absolute paths without symlinks to avoid
@@ -111,7 +118,7 @@ By default such a helper program is called if it exists.
 .BR \-l , " \-\-lazy"
 Lazy unmount.  Detach the filesystem from the file hierarchy now,
 and clean up all references to this filesystem as soon as it is not busy
-anymore.  (Requires kernel 2.4.11 or later.)
+anymore.
 .TP
 .BR \-n , " \-\-no\-mtab"
 Unmount without writing in

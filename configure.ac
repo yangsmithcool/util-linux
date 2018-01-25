@@ -28,7 +28,7 @@ PACKAGE_VERSION_RELEASE=$(echo $PACKAGE_VERSION | awk -F. '{
 
 dnl libblkid version
 LIBBLKID_VERSION="$PACKAGE_VERSION_MAJOR.$PACKAGE_VERSION_MINOR.$PACKAGE_VERSION_RELEASE"
-LIBBLKID_DATE="08-Nov-2016"
+LIBBLKID_DATE="19-Oct-2017"
 LIBBLKID_LT_MAJOR=1
 LIBBLKID_LT_MINOR=1
 LIBBLKID_LT_MICRO=0
@@ -72,13 +72,17 @@ AS_CASE([$exec_prefix:$prefix],
   ]
 )
 
-AS_CASE([$prefix:$localstatedir],
-  [NONE:'${prefix}/var' | /usr:'${prefix}/var'],
-    [localstatedir=/run
-     AC_MSG_NOTICE([  --localstatedir defaults to /run])
-    ]
+
+# default for old versions without $runstatedir
+AS_IF([test x"$runstatedir" = x], [runstatedir='${localstatedir}/run'])
+
+# our default if $localstatedir unchanged
+AS_CASE([$localstatedir:$runstatedir],
+ [NONE:'${localstatedir}/run' | /var:'${localstatedir}/run' | NONE:'/run' ],
+   [runstatedir=/run; AC_MSG_NOTICE([  --runstatedir defaults to /run])]
 )
-AC_SUBST([localstatedir])
+
+AC_SUBST([runstatedir])
 
 
 # The original default values of {bin,sbin,lib}dir
@@ -137,6 +141,17 @@ AC_SUBST([BSD_WARN_CFLAGS])
 UL_WARN_ADD([-Wno-unused-parameter], [NO_UNUSED_WARN_CFLAGS])
 AC_SUBST([NO_UNUSED_WARN_CFLAGS])
 
+
+AC_ARG_ENABLE([asan],
+  AS_HELP_STRING([--enable-asan], [compile with Address Sanitizer]),
+  [], [enable_asan=no]
+)
+AS_IF([test "x$enable_asan" == xyes], [
+  UL_WARN_ADD([-fsanitize=address])
+])
+
+
+
 dnl libtool-2
 LT_INIT
 
@@ -184,6 +199,7 @@ UL_SET_ARCH([HPPA], [hppa*|parisc*])
 
 AC_SYS_LARGEFILE
 AC_HEADER_ASSERT
+AC_STRUCT_TIMEZONE
 
 dnl Don't forget to maintain alternatively allowed versions in autogen.sh!
 AM_GNU_GETTEXT_VERSION([0.18.3])
@@ -218,6 +234,7 @@ AC_CHECK_HEADERS([ \
 	linux/tiocl.h \
 	linux/version.h \
 	linux/securebits.h \
+	linux/net_namespace.h \
 	locale.h \
 	mntent.h \
 	net/if.h \
@@ -288,8 +305,62 @@ AC_CHECK_HEADERS([langinfo.h],
 		[AM_CONDITIONAL([HAVE_LANGINFO], [true])],
 		[AM_CONDITIONAL([HAVE_LANGINFO], [false])])
 
+
+AC_MSG_CHECKING([whether langinfo.h defines ALTMON_x constants])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+	#include <langinfo.h>
+]], [[
+	char *str;
+	str = nl_langinfo (ALTMON_1);
+	str = nl_langinfo (ALTMON_2);
+	str = nl_langinfo (ALTMON_3);
+	str = nl_langinfo (ALTMON_4);
+	str = nl_langinfo (ALTMON_5);
+	str = nl_langinfo (ALTMON_6);
+	str = nl_langinfo (ALTMON_7);
+	str = nl_langinfo (ALTMON_8);
+	str = nl_langinfo (ALTMON_9);
+	str = nl_langinfo (ALTMON_10);
+	str = nl_langinfo (ALTMON_11);
+	str = nl_langinfo (ALTMON_12);
+]])], [
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([HAVE_LANGINFO_ALTMON], [1],
+		[Define if langinfo.h defines ALTMON_x constants])
+], [
+	AC_MSG_RESULT([no])
+])
+
+
+AC_MSG_CHECKING([whether langinfo.h defines _NL_ABALTMON_x constants])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+	#include <langinfo.h>
+]], [[
+	char *str;
+	str = nl_langinfo (_NL_ABALTMON_1);
+	str = nl_langinfo (_NL_ABALTMON_2);
+	str = nl_langinfo (_NL_ABALTMON_3);
+	str = nl_langinfo (_NL_ABALTMON_4);
+	str = nl_langinfo (_NL_ABALTMON_5);
+	str = nl_langinfo (_NL_ABALTMON_6);
+	str = nl_langinfo (_NL_ABALTMON_7);
+	str = nl_langinfo (_NL_ABALTMON_8);
+	str = nl_langinfo (_NL_ABALTMON_9);
+	str = nl_langinfo (_NL_ABALTMON_10);
+	str = nl_langinfo (_NL_ABALTMON_11);
+	str = nl_langinfo (_NL_ABALTMON_12);
+]])], [
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([HAVE_LANGINFO_NL_ABALTMON], [1],
+		[Define if langinfo.h defines _NL_ABALTMON_x constants])
+], [
+	AC_MSG_RESULT([no])
+])
+
+
 dnl Convert some ac_cv_header_* variables to have_*
 dnl
+have_linux_version_h=$ac_cv_header_linux_version_h
 have_linux_blkzoned_h=$ac_cv_header_linux_blkzoned_h
 have_linux_btrfs_h=$ac_cv_header_linux_btrfs_h
 have_linux_raw_h=$ac_cv_header_linux_raw_h
@@ -301,6 +372,11 @@ have_security_openpam_h=$ac_cv_header_security_openpam_h
 have_shadow_h=$ac_cv_header_shadow_h
 have_sys_signalfd_h=$ac_cv_header_sys_signalfd_h
 have_utmpx_h=$ac_cv_header_utmpx_h
+
+AS_CASE([$linux_os:$have_linux_version_h],
+  [yes:no],
+    [AC_MSG_ERROR([kernel headers required on Linux])]
+)
 
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 #include <time.h>
@@ -319,20 +395,6 @@ AC_CHECK_MEMBERS([struct termios.c_line],,,
 
 AC_CHECK_MEMBERS([struct stat.st_mtim.tv_nsec],,,
 	[#include <sys/stat.h>])
-
-AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
-[[
-#ifdef HAVE_SYS_SWAP_H
-# include <sys/swap.h>
-#endif
-#include <unistd.h>
-]],
-[[swapon("/dev/null", 0);]])],
-[AC_DEFINE([SWAPON_HAS_TWO_ARGS], [1], [Is swapon() declared with two parameters?])
-],
-[AC_MSG_NOTICE([Your libc thinks that swapon has 1 arg only.])
-])
-
 
 AC_CHECK_DECLS([_NL_TIME_WEEK_1STDAY],[],[],[[#include <langinfo.h>]])
 
@@ -380,6 +442,7 @@ AC_CHECK_FUNCS([ \
 	__fpending \
 	secure_getenv \
 	__secure_getenv \
+	eaccess \
 	err \
 	errx \
 	explicit_bzero \
@@ -421,6 +484,7 @@ AC_CHECK_FUNCS([ \
 	sysinfo \
 	timegm \
 	usleep \
+	vwarnx \
 	warn \
 	warnx \
 ])
@@ -433,6 +497,7 @@ AC_CHECK_FUNCS([inotify_init1], [have_inotify_init1=yes])
 AC_CHECK_FUNCS([open_memstream], [have_open_memstream=yes],[have_open_memstream=no])
 AC_CHECK_FUNCS([reboot], [have_reboot=yes],[have_reboot=no])
 AC_CHECK_FUNCS([updwtmpx updwtmpx], [have_gnu_utmpx=yes], [have_gnu_utmpx=no])
+AC_CHECK_FUNCS([getusershell], [have_getusershell=yes],[have_getusershell=no])
 
 AM_CONDITIONAL([HAVE_OPENAT], [test "x$have_openat" = xyes])
 
@@ -792,12 +857,24 @@ AC_ARG_WITH([ncursesw],
   [], [with_ncursesw=auto]
 )
 have_ncursesw=no
+have_ncursesw_header=no
 AS_IF([test "x$with_ncursesw" != xno], [
   UL_NCURSES_CHECK([ncursesw])
   AS_IF([test "x$have_ncursesw" = xyes], [
-    AC_DEFINE([HAVE_LIBNCURSESW], [1], [Define if ncursesw library available])
+    AC_CHECK_HEADERS([ncursesw/ncurses.h], [have_ncursesw_header=yes])
+    AC_CHECK_HEADERS([ncursesw/term.h])
+
+    # Define HAVE_NCURSES_H only if check for HAVE_NCURSESW_NCURSES_H is
+    # unsuccessful to avoid too many *_H permitations in config.h
+    AS_IF([test "x$have_ncursesw_header" = xno], [
+	   AC_CHECK_HEADERS([ncurses.h], [have_ncursesw_header=yes])
+	   AC_CHECK_HEADERS([term.h])
+    ])
+    AS_IF([test "x$have_ncursesw_header" = xno], [have_ncursesw=no])
+  ])
+  AS_IF([test "x$have_ncursesw" = xyes], [
     CURSES_LIB_NAME="ncursesw"
-    AC_CHECK_HEADERS([ncursesw/ncurses.h ncurses.h])
+    AC_DEFINE([HAVE_LIBNCURSESW], [1], [Define if ncursesw library available])
   ])
 ])
 AS_CASE([$with_ncursesw:$have_ncursesw],
@@ -810,16 +887,27 @@ AC_ARG_WITH([ncurses],
   [], [with_ncurses=auto]
 )
 have_ncurses=no
-
+have_ncurses_header=no
 AS_CASE([$with_ncurses:$build_widechar],
   [yes:yes], [AC_MSG_ERROR([wide-char support enabled, but non-wide ncurses selects])])
 
 AS_IF([test "x$have_ncursesw" = xno -a "x$with_ncurses" != xno ], [
   UL_NCURSES_CHECK([ncurses])
   AS_IF([test "x$have_ncurses" = xyes], [
-    AC_DEFINE([HAVE_LIBNCURSES], [1], [Define if ncurses library available])
+    AC_CHECK_HEADERS([ncurses/ncurses.h], [have_ncurses_header=yes])
+    AC_CHECK_HEADERS([ncurses/term.h])
+
+    # Define HAVE_NCURSES_H only if check for HAVE_NCURSES_NCURSES_H is
+    # unsuccessful to avoid too many *_H permitations in config.h
+    AS_IF([test "x$have_ncurses_header" = xno], [
+	   AC_CHECK_HEADERS([ncurses.h], [have_ncurses_header=yes])
+	   AC_CHECK_HEADERS([term.h])
+    ])
+    AS_IF([test "x$have_ncurses_header" = xno], [have_ncurses=no])
+  ])
+  AS_IF([test "x$have_ncurses" = xyes], [
     CURSES_LIB_NAME="ncurses"
-    AC_CHECK_HEADERS([ncurses/ncurses.h ncurses.h])
+    AC_DEFINE([HAVE_LIBNCURSES], [1], [Define if ncurses library available])
   ])
 ])
 AS_CASE([$with_ncurses:$have_ncurses],
@@ -869,27 +957,21 @@ AC_ARG_WITH([tinfo], AS_HELP_STRING([--without-tinfo], [compile without libtinfo
   [], [with_tinfo=auto]
 )
 have_tinfo=no
+have_tinfow=no
 AS_IF([test "x$with_tinfo" != xno], [
-  dnl Try pkg-config for libtinfo
-  PKG_CHECK_MODULES(TINFO, [tinfo], [
-    dnl pkg-config success
-    have_tinfo=yes
-    UL_PKG_STATIC([TINFO_LIBS_STATIC], [tinfo])], [
-
-    dnl If pkg-config failed, fall back to classic searching.
-    AC_CHECK_LIB([tinfo], [tgetent], [
-       have_tinfo=yes
-       TINFO_LIBS="-ltinfo"
-       TINFO_LIBS_STATIC="-ltinfo"
-       TINFO_CFLAGS=""])
+  AS_IF([test "x$have_ncursesw" = xyes], [
+    UL_TINFO_CHECK([tinfow])
+  ])
+  AS_IF([test "x$have_tinfow" = xno], [
+    UL_TINFO_CHECK([tinfo])
   ])
 ])
 AC_SUBST([TINFO_LIBS])
 AC_SUBST([TINFO_LIBS_STATIC])
 AC_SUBST([TINFO_CFLAGS])
-AM_CONDITIONAL([HAVE_TINFO], [test "x$have_tinfo" = xyes])
-AS_IF([test "x$have_tinfo" = xyes], [
-  AC_DEFINE(HAVE_LIBTINFO, 1, [Define if libtinfo available.])
+AM_CONDITIONAL([HAVE_TINFO], [test "x$have_tinfo" = xyes -o "x$have_tinfow" = xyes])
+AS_IF([test "x$have_tinfo" = xyes -o "x$have_tinfow" = xyes], [
+  AC_DEFINE(HAVE_LIBTINFO, 1, [Define if libtinfo or libtinfow available.])
 ])
 
 
@@ -1130,6 +1212,11 @@ UL_BUILD_INIT([uuidgen], [check])
 UL_REQUIRES_BUILD([uuidgen], [libuuid])
 AM_CONDITIONAL([BUILD_UUIDGEN], [test "x$build_uuidgen" = xyes])
 
+UL_BUILD_INIT([uuidparse], [check])
+UL_REQUIRES_BUILD([uuidparse], [libuuid])
+UL_REQUIRES_BUILD([uuidparse], [libsmartcols])
+AM_CONDITIONAL([BUILD_UUIDPARSE], [test "x$build_uuidparse" = xyes])
+
 UL_BUILD_INIT([blkid], [check])
 UL_REQUIRES_BUILD([blkid], [libblkid])
 AM_CONDITIONAL([BUILD_BLKID], [test "x$build_blkid" = xyes])
@@ -1140,6 +1227,7 @@ AM_CONDITIONAL([BUILD_FINDFS], [test "x$build_findfs" = xyes])
 
 UL_BUILD_INIT([wipefs], [check])
 UL_REQUIRES_BUILD([wipefs], [libblkid])
+UL_REQUIRES_BUILD([wipefs], [libsmartcols])
 AM_CONDITIONAL([BUILD_WIPEFS], [test "x$build_wipefs" = xyes])
 
 UL_BUILD_INIT([findmnt], [check])
@@ -1382,10 +1470,14 @@ AM_CONDITIONAL([BUILD_FSTRIM], [test "x$build_fstrim" = xyes])
 
 UL_BUILD_INIT([swapon], [check])
 UL_REQUIRES_LINUX([swapon])
+UL_REQUIRES_SYSCALL_CHECK([swapon], [UL_CHECK_SYSCALL([swapon])], [swapon])
+UL_REQUIRES_SYSCALL_CHECK([swapon], [UL_CHECK_SYSCALL([swapoff])], [swapoff])
 UL_REQUIRES_BUILD([swapon], [libblkid])
 UL_REQUIRES_BUILD([swapon], [libmount])
 UL_REQUIRES_BUILD([swapon], [libsmartcols])
 AM_CONDITIONAL([BUILD_SWAPON], [test "x$build_swapon" = xyes])
+AC_CHECK_FUNCS([swapon])
+AC_CHECK_FUNCS([swapoff])
 
 
 UL_BUILD_INIT([lsblk], [check])
@@ -1467,6 +1559,11 @@ AM_CONDITIONAL([BUILD_MCOOKIE], [test "x$build_mcookie" = xyes])
 UL_BUILD_INIT([namei], [yes])
 AM_CONDITIONAL([BUILD_NAMEI], [test "x$build_namei" = xyes])
 
+matriplet="$($CC -print-multiarch 2>/dev/null || true)"
+if test "x$matriplet" != "x"; then
+  AC_DEFINE_UNQUOTED([MULTIARCHTRIPLET], ["$matriplet"],
+  ["Multi-arch triplet for whereis library search path"])
+fi
 UL_BUILD_INIT([whereis], [yes])
 AM_CONDITIONAL([BUILD_WHEREIS], [test "x$build_whereis" = xyes])
 
@@ -1565,10 +1662,22 @@ AM_CONDITIONAL([BUILD_LSIPC], [test "x$build_lsipc" = xyes])
 UL_BUILD_INIT([lsns], [check])
 UL_REQUIRES_LINUX([lsns])
 UL_REQUIRES_BUILD([lsns], [libsmartcols])
+UL_REQUIRES_BUILD([lsns], [libmount])
 AM_CONDITIONAL([BUILD_LSNS], [test "x$build_lsns" = xyes])
 
 UL_BUILD_INIT([renice], [yes])
 AM_CONDITIONAL([BUILD_RENICE], [test "x$build_renice" = xyes])
+
+
+AC_ARG_ENABLE([rfkill],
+  AS_HELP_STRING([--disable-rfkill], [do not build rfkill]),
+  [], [UL_DEFAULT_ENABLE([rfkill], [check])]
+)
+UL_BUILD_INIT([rfkill])
+UL_REQUIRES_LINUX([rfkill])
+UL_REQUIRES_BUILD([rfkill], [libsmartcols])
+AM_CONDITIONAL([BUILD_RFKILL], [test "x$build_rfkill" = xyes])
+
 
 UL_BUILD_INIT([setsid], [yes])
 AM_CONDITIONAL([BUILD_SETSID], [test "x$build_setsid" = xyes])
@@ -1719,14 +1828,6 @@ UL_BUILD_INIT([rename])
 AM_CONDITIONAL([BUILD_RENAME], [test "x$build_rename" = xyes])
 
 
-AC_ARG_ENABLE([reset],
-  AS_HELP_STRING([--enable-reset], [build reset]),
-  [], [UL_DEFAULT_ENABLE([reset], [no])]
-)
-UL_BUILD_INIT([reset])
-AM_CONDITIONAL([BUILD_RESET], [test "x$build_reset" = xyes])
-
-
 AC_ARG_ENABLE([vipw],
   AS_HELP_STRING([--enable-vipw], [build vipw]),
   [], [UL_DEFAULT_ENABLE([vipw], [no])]
@@ -1775,6 +1876,7 @@ AC_ARG_ENABLE([chfn-chsh],
 )
 UL_BUILD_INIT([chfn_chsh])
 UL_REQUIRES_HAVE([chfn_chsh], [shadow_h], [shadow.h header])
+UL_REQUIRES_HAVE([chfn_chsh], [getusershell], [getusershell function])
 
 AS_IF([test "x$enable_chfn_chsh_password" = xyes -o "x$have_user" = xyes], [
   UL_REQUIRES_HAVE([chfn_chsh], [security_pam_appl_h], [PAM header file])
@@ -1867,7 +1969,7 @@ AC_ARG_ENABLE([ul],
   [], [UL_DEFAULT_ENABLE([ul], [check])]
 )
 UL_BUILD_INIT([ul])
-UL_REQUIRES_HAVE([ul], [ncursesw, tinfo, ncurses], [ncursesw, ncurses or tinfo libraries])
+UL_REQUIRES_HAVE([ul], [ncursesw, ncurses], [ncursesw or ncurses libraries])
 AM_CONDITIONAL([BUILD_UL], [test "x$build_ul" = xyes])
 
 
@@ -1876,7 +1978,7 @@ AC_ARG_ENABLE([more],
   [], [UL_DEFAULT_ENABLE([more], [check])]
 )
 UL_BUILD_INIT([more])
-UL_REQUIRES_HAVE([more], [ncursesw, tinfo, ncurses, termcap], [ncursesw, ncurses, tinfo or termcap libraries])
+UL_REQUIRES_HAVE([more], [ncursesw, ncurses], [ncursesw or ncurses libraries])
 AM_CONDITIONAL([BUILD_MORE], [test "x$build_more" = xyes])
 
 
@@ -2262,7 +2364,7 @@ AC_MSG_RESULT([
 	prefix:            ${prefix}
 	exec prefix:       ${exec_prefix}
 
-	localstatedir:     ${localstatedir}
+	runstatedir:       ${runstatedir}
 	bindir:            ${bindir}
 	sbindir:           ${sbindir}
 	libdir:            ${libdir}

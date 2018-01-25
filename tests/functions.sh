@@ -230,8 +230,9 @@ function ts_init_env {
 	LANGUAGE="POSIX"
 	LC_ALL="POSIX"
 	CHARSET="UTF-8"
+	ASAN_OPTIONS="detect_leaks=0"
 
-	export LANG LANGUAGE LC_ALL CHARSET
+	export LANG LANGUAGE LC_ALL CHARSET ASAN_OPTIONS
 
 	mydir=$(ts_canonicalize "$mydir")
 
@@ -270,6 +271,16 @@ function ts_init_env {
 	TS_OUTDIR="$top_builddir/tests/output/$TS_COMPONENT"
 	TS_DIFFDIR="$top_builddir/tests/diff/$TS_COMPONENT"
 
+	TS_NOLOCKS=$(ts_has_option "nolocks" "$*")
+	TS_LOCKDIR="$top_builddir/tests/output"
+
+	if [ ! -d "/proc/self/fd" ]; then
+		TS_NOLOCKS="yes"
+	fi
+
+	# Don't lock if flock(1) is missing
+	type "flock" >/dev/null 2>&1 || TS_NOLOCKS="yes"
+
 	ts_init_core_env
 
 	TS_VERBOSE=$(ts_has_option "verbose" "$*")
@@ -280,9 +291,13 @@ function ts_init_env {
 	TS_PARSABLE=$(ts_has_option "parsable" "$*")
 	[ "$TS_PARSABLE" = "yes" ] || TS_PARSABLE="$TS_PARALLEL"
 
-	tmp=$( ts_has_option "memcheck" "$*")
+	tmp=$( ts_has_option "memcheck-valgrind" "$*")
 	if [ "$tmp" == "yes" -a -f /usr/bin/valgrind ]; then
 		TS_VALGRIND_CMD="/usr/bin/valgrind"
+	fi
+	tmp=$( ts_has_option "memcheck-asan" "$*")
+	if [ "$tmp" == "yes" ]; then
+		TS_ENABLE_ASAN="yes"
 	fi
 
 	BLKID_FILE="$TS_OUTDIR/${TS_TESTNAME}.blkidtab"
@@ -376,13 +391,25 @@ function ts_init_py {
 	export PYTHON="python${PYTHON_MAJOR_VERSION}"
 }
 
-function ts_valgrind {
-	if [ -z "$TS_VALGRIND_CMD" ]; then
-		"$@"
-	else
+function ts_run {
+	#
+	# valgrind mode
+	#
+	if [ -n "$TS_VALGRIND_CMD" ]; then
 		$TS_VALGRIND_CMD --tool=memcheck --leak-check=full \
 				 --leak-resolution=high --num-callers=20 \
 				 --log-file="$TS_VGDUMP" "$@"
+	#
+	# ASAN mode
+	#
+	elif [ "$TS_ENABLE_ASAN" == "yes" ]; then
+		ASAN_OPTIONS='detect_leaks=1' "$@"
+
+	#
+	# Default mode
+	#
+	else
+		"$@"
 	fi
 }
 
@@ -415,11 +442,13 @@ function ts_gen_diff {
 }
 
 function tt_gen_mem_report {
-	[ -z "$TS_VALGRIND_CMD" ] && echo "$1"
-
-	grep -q -E 'ERROR SUMMARY: [1-9]' $TS_VGDUMP &> /dev/null
-	if [ $? -eq 0 ]; then
-		echo "mem-error detected!"
+	if [ -n "$TS_VALGRIND_CMD" ]; then
+		grep -q -E 'ERROR SUMMARY: [1-9]' $TS_VGDUMP &> /dev/null
+		if [ $? -eq 0 ]; then
+			echo "mem-error detected!"
+		fi
+	else
+		echo "$1"
 	fi
 }
 
@@ -606,6 +635,7 @@ function ts_fstab_open {
 
 function ts_fstab_close {
 	echo "# -->" >> /etc/fstab
+	sync /etc/fstab 2>/dev/null
 }
 
 function ts_fstab_addline {
@@ -617,7 +647,12 @@ function ts_fstab_addline {
 	echo "$SPEC   $MNT   $FS   $OPT   0   0" >> /etc/fstab
 }
 
+function ts_fstab_lock {
+	ts_lock "fstab"
+}
+
 function ts_fstab_add {
+	ts_fstab_lock
 	ts_fstab_open
 	ts_fstab_addline $*
 	ts_fstab_close
@@ -633,6 +668,9 @@ function ts_fstab_clean {
 }
 s/# <!-- util-linux.*-->//;
 /^$/d" /etc/fstab
+
+	sync /etc/fstab 2>/dev/null
+	ts_unlock "fstab"
 }
 
 function ts_fdisk_clean {
@@ -654,10 +692,67 @@ function ts_fdisk_clean {
 		$TS_OUTPUT
 }
 
+
+function ts_get_lock_fd {
+        local proc=$1
+        local lockfile=$2
+
+        for fd in $(ls /proc/$proc/fd); do
+                file=$(readlink "/proc/$proc/fd/$fd")
+                if [ x"$file" = x"$lockfile" ]; then
+                        echo "$fd"
+                        return 0
+                fi
+        done
+        return 1
+}
+
+function ts_lock {
+	local resource="$1"
+	local lockfile="${TS_LOCKDIR}/${resource}.lock"
+	local fd
+
+	if [ "$TS_NOLOCKS" == "yes" ]; then
+		return 0
+	fi
+
+	# Don't lock again
+	fd=$(ts_get_lock_fd $$ $lockfile)
+	if [ -n "$fd" ]; then
+		echo "[$$ $TS_TESTNAME] ${resource} already locked!"
+		return 0
+	fi
+
+	fd=$(( $(ls /proc/$$/fd/ | sort | tail -1) + 1))
+
+	eval "exec $fd>$lockfile"
+	flock --exclusive --timeout 30 $fd || ts_skip "failed to lock $resource"
+
+	###echo "[$$ $TS_TESTNAME] Locked   $resource"
+}
+
+function ts_unlock {
+	local resource="$1"
+	local lockfile="${TS_LOCKDIR}/${resource}.lock"
+	local fd
+
+	if [ "$TS_NOLOCKS" == "yes" ]; then
+		return 0
+	fi
+
+	fd=$(ts_get_lock_fd $$ $lockfile)
+	if [ -n "$fd" ]; then
+		###echo "[$$ $TS_TESTNAME] Unlocked $resource"
+		eval "exec $fd<&-"
+	fi
+}
+
 function ts_scsi_debug_init {
 	local devname
 	local t
 	TS_DEVICE="none"
+
+	ts_lock "scsi_debug"
 
 	# dry run is not really reliable, real modprobe may still fail
 	modprobe --dry-run --quiet scsi_debug &>/dev/null \
@@ -665,8 +760,11 @@ function ts_scsi_debug_init {
 
 	# skip if still in use or removal of modules not supported at all
 	# We don't want a slow timeout here so we don't use ts_scsi_debug_rmmod!
-	modprobe -r scsi_debug &>/dev/null \
-		|| ts_skip "cannot remove scsi_debug module (rmmod)"
+	modprobe -r scsi_debug &>/dev/null
+	if [ "$?" -eq 1 ]; then
+		ts_unlock "scsi_debug"
+		ts_skip "cannot remove scsi_debug module (rmmod)"
+	fi
 
 	modprobe -b scsi_debug "$@" &>/dev/null \
 		|| ts_skip "cannot load scsi_debug module (modprobe)"
@@ -727,6 +825,7 @@ function ts_scsi_debug_rmmod {
 
 	# TODO unset TS_DEVICE, check that nobody uses it later, e.g. ts_fdisk_clean
 
+	ts_unlock "scsi_debug"
 	return 0
 }
 

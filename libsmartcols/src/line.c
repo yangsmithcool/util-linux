@@ -160,13 +160,15 @@ int scols_line_move_cells(struct libscols_line *ln, size_t newn, size_t oldn)
 	/* remember data from old position */
 	memcpy(&ce, &ln->cells[oldn], sizeof(struct libscols_cell));
 
-	/* remove from old position */
-	memmove(ln->cells + oldn, ln->cells + oldn + 1,
-			(ln->ncells - oldn) * sizeof(struct libscols_cell));
+	/* remove old position (move data behind oldn to oldn) */
+	if (oldn + 1 < ln->ncells)
+		memmove(ln->cells + oldn, ln->cells + oldn + 1,
+			(ln->ncells - oldn - 1) * sizeof(struct libscols_cell));
 
 	/* create a space for new position */
-	memmove(ln->cells + newn + 1, ln->cells + newn,
-		(ln->ncells - newn) * sizeof(struct libscols_cell));
+	if (newn + 1 < ln->ncells)
+		memmove(ln->cells + newn + 1, ln->cells + newn,
+			(ln->ncells - newn - 1) * sizeof(struct libscols_cell));
 
 	/* copy original data to new position */
 	memcpy(&ln->cells[newn], &ce, sizeof(struct libscols_cell));
@@ -315,6 +317,10 @@ int scols_line_next_child(struct libscols_line *ln,
  *
  * The function is designed to detect circular dependencies between @ln and
  * @parent. It checks if @ln is not any (grand) parent in the @parent's tree.
+ *
+ * Since: 2.30
+ *
+ * Returns: 0 or 1
  */
 int scols_line_is_ancestor(struct libscols_line *ln, struct libscols_line *parent)
 {

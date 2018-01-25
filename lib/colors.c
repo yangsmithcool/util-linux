@@ -10,9 +10,22 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <ctype.h>
-#ifdef HAVE_LIBTINFO
-# include <curses.h>
-# include <term.h>
+
+#if defined(HAVE_LIBNCURSES) || defined(HAVE_LIBNCURSESW)
+# if defined(HAVE_NCURSESW_NCURSES_H)
+#  include <ncursesw/ncurses.h>
+# elif defined(HAVE_NCURSES_NCURSES_H)
+#  include <ncurses/ncurses.h>
+# elif defined(HAVE_NCURSES_H)
+#  include <ncurses.h>
+# endif
+# if defined(HAVE_NCURSESW_TERM_H)
+#  include <ncursesw/term.h>
+# elif defined(HAVE_NCURSES_TERM_H)
+#  include <ncurses/term.h>
+# elif defined(HAVE_TERM_H)
+#  include <term.h>
+# endif
 #endif
 
 #include "c.h"
@@ -633,7 +646,7 @@ done:
 
 static void termcolors_init_debug(void)
 {
-	__UL_INIT_DEBUG(termcolors, TERMCOLORS_DEBUG_, 0, TERMINAL_COLORS_DEBUG);
+	__UL_INIT_DEBUG_FROM_ENV(termcolors, TERMCOLORS_DEBUG_, 0, TERMINAL_COLORS_DEBUG);
 }
 
 static int colors_terminal_is_ready(void)
@@ -643,19 +656,21 @@ static int colors_terminal_is_ready(void)
 	if (isatty(STDOUT_FILENO) != 1)
 		goto none;
 
-#ifdef HAVE_LIBTINFO
+#if defined(HAVE_LIBNCURSES) || defined(HAVE_LIBNCURSESW)
 	{
 		int ret;
 
-		if (setupterm(NULL, STDOUT_FILENO, &ret) != OK || ret != 1)
+		if (setupterm(NULL, STDOUT_FILENO, &ret) != 0 || ret != 1)
 			goto none;
 		ncolors = tigetnum("colors");
 		if (ncolors <= 2)
 			goto none;
 	}
 #endif
-	DBG(CONF, ul_debug("terminal is ready (supports %d colors)", ncolors));
-	return 1;
+	if (ncolors != -1) {
+		DBG(CONF, ul_debug("terminal is ready (supports %d colors)", ncolors));
+		return 1;
+	}
 none:
 	DBG(CONF, ul_debug("terminal is NOT ready"));
 	return 0;

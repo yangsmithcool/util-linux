@@ -1,16 +1,6 @@
 
  Note that items with (!) have high priority.
 
-- (!) remove usage(stderr) on command line errors (unsupported options, etc.)
-
-
-su/runuser
-----------
-  - (!) implement pty container for all su/runuser session (something like
-    script(1)) to separate user from the original terminal (see CVE-2016-2779)
-
-- add functions strtime_short(), strtime_iso(), strtime_ctime(), ...
-
 cleanup lib/path.c:
 ------------------
    - always return rc from all functions
@@ -29,9 +19,6 @@ lscpu
 
 lsblk
 -----
-  - (!) add --tree to force tree output for operations like --sort where the
-    --list is enabled by default.
-
   - currently it does not show mountpoint for all devices in btrfs RAID. It's because
     /proc/#/mountinfo contains reference to the one device only. Maybe we can add some
     btrfs specific code to provide a better output for FS based stacks. Not sure.
@@ -44,7 +31,6 @@ cfdisk
     enabled by default for logical partitions if we created all container (extended
     partition) in the current session.
       
-
 agetty
 -----
   - support default issue (/etc/issue) output for agetty to make it agetty
@@ -81,6 +67,15 @@ bash completion
 libmount (mount/umount)
 -----------------------
 
+ - support CAP_SYS_ADMIN; for mount(2) syscall the CAP_SYS_ADMIN is good
+   enough. Unfortunately, mount(8) does more things like check for filesystem
+   type (but it's usually done by udev, so root perms are unnecessary), create
+   loop devices, write to /run/mount/utab or /etc/mtab, etc.
+
+   It would be nice to improve libmount to check for CAP_SYS_ADMIN if suid not
+   set and allow to use it for simple tasks where no another operation is
+   necessary.
+
  - allow to execute mount(2) in another namespace, something like:
 	mount --namespace=/proc/$n/ns/mnt  /dev/sda2 /bar
    see https://bugzilla.redhat.com/show_bug.cgi?id=1199554 for more details.
@@ -107,6 +102,13 @@ docs
 
  - (!) add API documentation to libuuid
 
+exit codes
+----------
+
+  - we need coreutils-like exit codes for failed exec(). See:
+    https://www.spinics.net/lists/util-linux-ng/msg12776.html
+    and original attempt:
+    https://github.com/karelzak/util-linux/pull/311
 
 login-utils:
 -----------
@@ -121,6 +123,7 @@ login-utils:
       su --group too.
     * note that shadow-utils newgpr(1) provides support for syslog and audit log.
 
+
 libblkid
 --------
 
@@ -129,25 +132,16 @@ libblkid
 
  - add FSSIZE value  -- filesystem size (klibc requirement)
 
+ - (!) add support for Atari PT
+       https://github.com/karelzak/util-linux/issues/517
+
  - (!) add support for dasd PT (used for example on s390)
 
 libfdisk
 --------
 
- - (!) use fputs_quoted() when print partition name= and allow to use \x%02x
-       for input to escape unprintable chars and quotes.
-
  - add support for Apple Partition Map (see libblkid/src/partitions/mac.c)
    http://en.wikipedia.org/wiki/Apple_Partition_Map
-
- - catch SIGINT (Ctrl-C) and return to main menu.
-   From Red Hat bugzilla #545488:
-
-   While using fdisk normally, if you accidentally pressed the wrong button (to
-   start a sequence of questions for some operation, e.g. 'c' to create
-   partition).  The tool tries too hard to keep asking you for valid input.  You
-   can't provide a blank or invalid input to get it to break out of the current
-   dialog sequence and get back to the main menu.
 
 misc
 ----

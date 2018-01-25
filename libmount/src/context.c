@@ -33,6 +33,7 @@
 
 #include "mountP.h"
 #include "fileutils.h"
+#include "strutils.h"
 
 #include <sys/wait.h>
 
@@ -487,6 +488,8 @@ int mnt_context_is_rdonly_umount(struct libmnt_context *cxt)
  * Force read-write mount; if enabled libmount will never try MS_RDONLY
  * after failed mount(2) EROFS. (See mount(8) man page, option -w).
  *
+ * Since: 2.30
+ *
  * Returns: 0 on success, negative number in case of error.
  */
 int mnt_context_enable_rwonly_mount(struct libmnt_context *cxt, int enable)
@@ -501,6 +504,8 @@ int mnt_context_enable_rwonly_mount(struct libmnt_context *cxt, int enable)
  * See also mnt_context_enable_rwonly_mount() and mount(8) man page,
  * option -w.
  *
+ * Since: 2.30
+ *
  * Returns: 1 if only read-write mount is allowed.
  */
 int mnt_context_is_rwonly_mount(struct libmnt_context *cxt)
@@ -513,6 +518,8 @@ int mnt_context_is_rwonly_mount(struct libmnt_context *cxt)
  * @cxt: mount context
  *
  * See also mnt_context_enable_rwonly_mount().
+ *
+ * Since: 2.30
  *
  * Returns: 1 if mounted read-only on write-protected device.
  */
@@ -1118,7 +1125,10 @@ int mnt_context_get_mtab_for_target(struct libmnt_context *cxt,
 	char *cn_tgt = NULL;
 	int rc;
 
-	if (mnt_stat_mountpoint(tgt, &st) == 0 && S_ISDIR(st.st_mode)) {
+	if (mnt_context_is_nocanonicalize(cxt))
+		mnt_context_set_tabfilter(cxt, mtab_filter, (void *) tgt);
+
+	else if (mnt_stat_mountpoint(tgt, &st) == 0 && S_ISDIR(st.st_mode)) {
 		cache = mnt_context_get_cache(cxt);
 		cn_tgt = mnt_resolve_path(tgt, cache);
 		if (cn_tgt)
@@ -1126,12 +1136,10 @@ int mnt_context_get_mtab_for_target(struct libmnt_context *cxt,
 	}
 
 	rc = mnt_context_get_mtab(cxt, mtab);
+	mnt_context_set_tabfilter(cxt, NULL, NULL);
 
-	if (cn_tgt) {
-		mnt_context_set_tabfilter(cxt, NULL, NULL);
-		if (!cache)
-			free(cn_tgt);
-	}
+	if (cn_tgt && !cache)
+		free(cn_tgt);
 
 	return rc;
 }
@@ -1958,7 +1966,7 @@ static int apply_table(struct libmnt_context *cxt, struct libmnt_table *tb,
 		     int direction)
 {
 	struct libmnt_fs *fs = NULL;
-	const char *src = NULL, *tgt = NULL;
+	const char *src, *tgt;
 	int rc;
 
 	assert(cxt);
@@ -2038,7 +2046,7 @@ static int apply_table(struct libmnt_context *cxt, struct libmnt_table *tb,
  */
 int mnt_context_apply_fstab(struct libmnt_context *cxt)
 {
-	int rc = -1, isremount = 0;
+	int rc = -1, isremount = 0, iscmdbind = 0;
 	struct libmnt_table *tab = NULL;
 	const char *src = NULL, *tgt = NULL;
 	unsigned long mflags = 0;
@@ -2063,8 +2071,10 @@ int mnt_context_apply_fstab(struct libmnt_context *cxt)
 		cxt->optsmode &= ~MNT_OMODE_FORCE;
 	}
 
-	if (mnt_context_get_mflags(cxt, &mflags) == 0 && mflags & MS_REMOUNT)
-		isremount = 1;
+	if (mnt_context_get_mflags(cxt, &mflags) == 0) {
+		isremount = !!(mflags & MS_REMOUNT);
+		iscmdbind = !!(mflags & MS_BIND);
+	}
 
 	if (cxt->fs) {
 		src = mnt_fs_get_source(cxt->fs);
@@ -2131,6 +2141,12 @@ int mnt_context_apply_fstab(struct libmnt_context *cxt)
 		 * not found are not so important and may be misinterpreted by
 		 * applications... */
 		rc = -MNT_ERR_NOFSTAB;
+
+
+	} else if (isremount && !iscmdbind) {
+
+		/* remove "bind" from fstab (or no-op if not present) */
+		mnt_optstr_remove_option(&cxt->fs->optstr, "bind");
 	}
 	return rc;
 }
@@ -2329,6 +2345,8 @@ int mnt_context_get_generic_excode(int rc, char *buf, size_t bufsz, char *fmt, .
  * The @mntrc is usually return code from mnt_context_mount(),
  * mnt_context_umount(), or 'mntrc' as returned by mnt_context_next_mount().
  *
+ * Since: 2.30
+ *
  * Returns: MNT_EX_* codes.
  */
 int mnt_context_get_excode(
@@ -2441,14 +2459,23 @@ int mnt_context_helper_setopt(struct libmnt_context *cxt, int c, char *arg)
 int mnt_context_is_fs_mounted(struct libmnt_context *cxt,
 			      struct libmnt_fs *fs, int *mounted)
 {
-	struct libmnt_table *mtab;
+	struct libmnt_table *mtab, *orig;
 	int rc;
 
 	if (!cxt || !fs || !mounted)
 		return -EINVAL;
 
+	orig = cxt->mtab;
 	rc = mnt_context_get_mtab(cxt, &mtab);
-	if (rc)
+	if (rc == -ENOENT && mnt_fs_streq_target(fs, "/proc") &&
+	    (!cxt->mtab_path || startswith(cxt->mtab_path, "/proc/"))) {
+		if (!orig) {
+			mnt_unref_table(cxt->mtab);
+			cxt->mtab = NULL;
+		}
+		*mounted = 0;
+		return 0;	/* /proc not mounted */
+	} else if (rc)
 		return rc;
 
 	*mounted = mnt_table_is_fs_mounted(mtab, fs);

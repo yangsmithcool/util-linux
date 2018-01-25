@@ -169,7 +169,10 @@ void list_disklabel(struct fdisk_context *cxt)
 
 			if (fdisk_partition_to_string(pa, cxt, ids[i], &data))
 				continue;
-			scols_line_refer_data(ln, i, data);
+			if (scols_line_refer_data(ln, i, data)) {
+				fdisk_warn(cxt, _("failed to add output data"));
+				goto done;
+			}
 		}
 	}
 
@@ -190,6 +193,13 @@ void list_disklabel(struct fdisk_context *cxt)
 			fdisk_warnx(cxt, _("Partition %zu does not start on physical sector boundary."),
 					  fdisk_partition_get_partno(pa) + 1);
 			post++;
+		}
+		if (fdisk_partition_has_wipe(cxt, pa)) {
+			if (!post)
+				fdisk_info(cxt, ""); /* line break */
+			 fdisk_info(cxt, _("Filesystem/RAID signature on partition %zu will be wiped."),
+					 fdisk_partition_get_partno(pa) + 1);
+			 post++;
 		}
 	}
 
@@ -259,7 +269,10 @@ void list_freespace(struct fdisk_context *cxt)
 		for (i = 0; i < ARRAY_SIZE(colids); i++) {
 			if (fdisk_partition_to_string(pa, cxt, colids[i], &data))
 				continue;
-			scols_line_refer_data(ln, i, data);
+			if (scols_line_refer_data(ln, i, data)) {
+				fdisk_warn(cxt, _("failed to add output data"));
+				goto done;
+			}
 		}
 
 		if (fdisk_partition_has_size(pa))
@@ -321,7 +334,7 @@ char *next_proc_partition(FILE **f)
 		if (devno <= 0)
 			continue;
 
-		if (sysfs_devno_is_lvm_private(devno) ||
+		if (sysfs_devno_is_lvm_private(devno, NULL) ||
 		    sysfs_devno_is_wholedisk(devno) <= 0)
 			continue;
 
@@ -416,7 +429,7 @@ void list_available_columns(FILE *out)
 
 	termwidth = get_terminal_width(80);
 
-	fprintf(out, _("\nAvailable columns (for -o):\n"));
+	fprintf(out, USAGE_COLUMNS);
 
 	while (fdisk_next_label(cxt, &lb) == 0) {
 		size_t width = 6;	/* label name and separators */

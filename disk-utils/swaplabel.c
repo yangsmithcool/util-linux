@@ -51,7 +51,12 @@ static int print_info(blkid_probe pr)
 }
 
 /* Change the swap partition info */
+#ifdef HAVE_LIBUUID
 static int change_info(const char *devname, const char *label, const char *uuid)
+#else
+static int change_info(const char *devname, const char *label,
+		       const char *uuid __attribute__((__unused__)))
+#endif
 {
 	int fd;
 
@@ -111,8 +116,9 @@ err:
 	return -1;
 }
 
-static void __attribute__((__noreturn__)) usage(FILE *out)
+static void __attribute__((__noreturn__)) usage(void)
 {
+	FILE *out = stdout;
 	fputs(USAGE_HEADER, out);
 	fprintf(out, _(" %s [options] <device>\n"),
 		program_invocation_short_name);
@@ -124,10 +130,9 @@ static void __attribute__((__noreturn__)) usage(FILE *out)
 	fputs(_(" -L, --label <label> specify a new label\n"
 		" -U, --uuid <uuid>   specify a new uuid\n"), out);
 	fputs(USAGE_SEPARATOR, out);
-	fputs(USAGE_HELP, out);
-	fputs(USAGE_VERSION, out);
-	fprintf(out, USAGE_MAN_TAIL("swaplabel(8)"));
-	exit(out == stderr ? EXIT_FAILURE : EXIT_SUCCESS);
+	printf(USAGE_HELP_OPTIONS(21));
+	printf(USAGE_MAN_TAIL("swaplabel(8)"));
+	exit(EXIT_SUCCESS);
 }
 
 int main(int argc, char *argv[])
@@ -152,7 +157,7 @@ int main(int argc, char *argv[])
 	while ((c = getopt_long(argc, argv, "hVL:U:", longopts, NULL)) != -1) {
 		switch (c) {
 		case 'h':
-			usage(stdout);
+			usage();
 			break;
 		case 'V':
 			printf(UTIL_LINUX_VERSION);
@@ -172,9 +177,10 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (optind == argc)
-		usage(stderr);
-
+	if (optind == argc) {
+		warnx(_("no device specified"));
+		errtryhelp(EXIT_FAILURE);
+	}
 	devname = argv[optind];
 	pr = get_swap_prober(devname);
 	if (pr) {

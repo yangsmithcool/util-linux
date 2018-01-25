@@ -41,15 +41,6 @@
 
 #include "nls.h"
 
-#ifdef __GNUC__
-#define CODE_ATTR(x) __attribute__(x)
-#else
-#define CODE_ATTR(x)
-#endif
-
-/* length of textual representation of UUID, including trailing \0 */
-#define UUID_STR_LEN	37
-
 /* length of binary representation of UUID */
 #define UUID_LEN	(sizeof(uuid_t))
 
@@ -64,8 +55,9 @@ struct uuidd_cxt_t {
 			no_sock: 1;
 };
 
-static void __attribute__ ((__noreturn__)) usage(FILE * out)
+static void __attribute__((__noreturn__)) usage(void)
 {
+	FILE *out = stdout;
 	fputs(USAGE_HEADER, out);
 	fprintf(out, _(" %s [options]\n"), program_invocation_short_name);
 	fputs(USAGE_SEPARATOR, out);
@@ -84,10 +76,9 @@ static void __attribute__ ((__noreturn__)) usage(FILE * out)
 	fputs(_(" -d, --debug             run in debugging mode\n"), out);
 	fputs(_(" -q, --quiet             turn on quiet mode\n"), out);
 	fputs(USAGE_SEPARATOR, out);
-	fputs(USAGE_HELP, out);
-	fputs(USAGE_VERSION, out);
-	fprintf(out, USAGE_MAN_TAIL("uuidd(8)"));
-	exit(out == stderr ? EXIT_FAILURE : EXIT_SUCCESS);
+	printf(USAGE_HELP_OPTIONS(25));
+	printf(USAGE_MAN_TAIL("uuidd(8)"));
+	exit(EXIT_SUCCESS);
 }
 
 static void create_daemon(void)
@@ -639,7 +630,7 @@ int main(int argc, char **argv)
 			printf(UTIL_LINUX_VERSION);
 			return EXIT_SUCCESS;
 		case 'h':
-			usage(stdout);
+			usage();
 		default:
 			errtryhelp(EXIT_FAILURE);
 		}

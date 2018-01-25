@@ -58,8 +58,8 @@ enum {
 };
 
 static struct colinfo infos[] = {
-	[COL_PAGES]  = { "PAGES",    1, SCOLS_FL_RIGHT, N_("file data residend in memory in pages")},
-	[COL_RES]    = { "RES",      5, SCOLS_FL_RIGHT, N_("file data residend in memory in bytes")}, 
+	[COL_PAGES]  = { "PAGES",    1, SCOLS_FL_RIGHT, N_("file data resident in memory in pages")},
+	[COL_RES]    = { "RES",      5, SCOLS_FL_RIGHT, N_("file data resident in memory in bytes")}, 
 	[COL_SIZE]   = { "SIZE",     5, SCOLS_FL_RIGHT, N_("size of the file")},
 	[COL_FILE]   = { "FILE",     4, 0, N_("file name")},
 };
@@ -120,16 +120,18 @@ static int add_output_data(struct fincore_control *ctl,
 
 	ln = scols_table_new_line(ctl->tb, NULL);
 	if (!ln)
-		err(EXIT_FAILURE, _("failed to initialize output line"));
+		err(EXIT_FAILURE, _("failed to allocate output line"));
 
 	for (i = 0; i < ncolumns; i++) {
+		int rc = 0;
+
 		switch(get_column_id(i)) {
 		case COL_FILE:
-			scols_line_set_data(ln, i, name);
+			rc = scols_line_set_data(ln, i, name);
 			break;
 		case COL_PAGES:
 			xasprintf(&tmp, "%jd",  (intmax_t) count_incore);
-			scols_line_refer_data(ln, i, tmp);
+			rc = scols_line_refer_data(ln, i, tmp);
 			break;
 		case COL_RES:
 		{
@@ -139,7 +141,7 @@ static int add_output_data(struct fincore_control *ctl,
 				xasprintf(&tmp, "%ju", res);
 			else
 				tmp = size_to_human_string(SIZE_SUFFIX_1LETTER, res);
-			scols_line_refer_data(ln, i, tmp);
+			rc = scols_line_refer_data(ln, i, tmp);
 			break;
 		}
 		case COL_SIZE:
@@ -147,11 +149,14 @@ static int add_output_data(struct fincore_control *ctl,
 				xasprintf(&tmp, "%jd", (intmax_t) file_size);
 			else
 				tmp = size_to_human_string(SIZE_SUFFIX_1LETTER, file_size);
-			scols_line_refer_data(ln, i, tmp);
+			rc = scols_line_refer_data(ln, i, tmp);
 			break;
 		default:
 			return -EINVAL;
 		}
+
+		if (rc)
+			err(EXIT_FAILURE, _("failed to add output data"));
 	}
 
 	return 0;
@@ -189,13 +194,13 @@ static int fincore_fd (struct fincore_control *ctl,
 		       off_t *count_incore)
 {
 	size_t window_size = N_PAGES_IN_WINDOW * ctl->pagesize;
-	off_t  file_offset;
-	void  *window = NULL;
+	off_t file_offset;
 	int rc = 0;
 	int warned_once = 0;
 
 	for (file_offset = 0; file_offset < file_size; file_offset += window_size) {
 		size_t len;
+		void  *window = NULL;
 
 		len = file_size - file_offset;
 		if (len >= window_size)
@@ -253,8 +258,9 @@ static int fincore_name(struct fincore_control *ctl,
 	return rc;
 }
 
-static void __attribute__((__noreturn__)) usage(FILE *out)
+static void __attribute__((__noreturn__)) usage(void)
 {
+	FILE *out = stdout;
 	size_t i;
 
 	fputs(USAGE_HEADER, out);
@@ -268,17 +274,16 @@ static void __attribute__((__noreturn__)) usage(FILE *out)
 	fputs(_(" -r, --raw             use raw output format\n"), out);
 
 	fputs(USAGE_SEPARATOR, out);
-	fputs(USAGE_HELP, out);
-	fputs(USAGE_VERSION, out);
+	printf(USAGE_HELP_OPTIONS(23));
 
-	fprintf(out, _("\nAvailable columns (for --output):\n"));
+	fprintf(out, USAGE_COLUMNS);
 
 	for (i = 0; i < ARRAY_SIZE(infos); i++)
 		fprintf(out, " %11s  %s\n", infos[i].name, _(infos[i].help));
 
-	fprintf(out, USAGE_MAN_TAIL("fincore(1)"));
+	printf(USAGE_MAN_TAIL("fincore(1)"));
 
-	exit(out == stderr ? EXIT_FAILURE : EXIT_SUCCESS);
+	exit(EXIT_SUCCESS);
 }
 
 int main(int argc, char ** argv)
@@ -329,7 +334,7 @@ int main(int argc, char ** argv)
 			printf(UTIL_LINUX_VERSION);
 			return EXIT_SUCCESS;
 		case 'h':
-			usage(stdout);
+			usage();
 		default:
 			errtryhelp(EXIT_FAILURE);
 		}
@@ -354,7 +359,7 @@ int main(int argc, char ** argv)
 	scols_init_debug(0);
 	ctl.tb = scols_new_table();
 	if (!ctl.tb)
-		err(EXIT_FAILURE, _("failed to create output table"));
+		err(EXIT_FAILURE, _("failed to allocate output table"));
 
 	scols_table_enable_noheadings(ctl.tb, ctl.noheadings);
 	scols_table_enable_raw(ctl.tb, ctl.raw);
@@ -366,7 +371,7 @@ int main(int argc, char ** argv)
 		const struct colinfo *col = get_column_info(i);
 
 		if (!scols_table_new_column(ctl.tb, col->name, col->whint, col->flags))
-			err(EXIT_FAILURE, _("failed to initialize output column"));
+			err(EXIT_FAILURE, _("failed to allocate output column"));
 	}
 
 	for(; optind < argc; optind++) {

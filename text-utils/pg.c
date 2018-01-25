@@ -59,13 +59,21 @@
 #include <signal.h>
 #include <setjmp.h>
 
-#ifdef HAVE_NCURSES_H
-# include <ncurses.h>
+#if defined(HAVE_NCURSESW_NCURSES_H)
+# include <ncursesw/ncurses.h>
 #elif defined(HAVE_NCURSES_NCURSES_H)
 # include <ncurses/ncurses.h>
+#elif defined(HAVE_NCURSES_H)
+# include <ncurses.h>
 #endif
 
-#include <term.h>
+#if defined(HAVE_NCURSESW_TERM_H)
+# include <ncursesw/term.h>
+#elif defined(HAVE_NCURSES_TERM_H)
+# include <ncurses/term.h>
+#elif defined(HAVE_TERM_H)
+# include <term.h>
+#endif
 
 #include "nls.h"
 #include "xalloc.h"
@@ -215,8 +223,9 @@ static void __attribute__((__noreturn__)) quit(int status)
 }
 
 /* Usage message and similar routines. */
-static void __attribute__((__noreturn__)) usage(FILE *out)
+static void __attribute__((__noreturn__)) usage(void)
 {
+	FILE *out = stdout;
 	fputs(USAGE_HEADER, out);
 	fprintf(out,
 		_(" %s [options] [+line] [+/pattern/] [files]\n"),
@@ -238,23 +247,22 @@ static void __attribute__((__noreturn__)) usage(FILE *out)
 	fputs(_(" +/pattern/   start at the line containing pattern\n"), out);
 
 	fputs(USAGE_SEPARATOR, out);
-	fputs(USAGE_HELP, out);
-	fputs(USAGE_VERSION, out);
+	printf(USAGE_HELP_OPTIONS(16));
 
-	fprintf(out, USAGE_MAN_TAIL("pg(1)"));
-	quit(out == stderr ? 2 : 0);
+	printf(USAGE_MAN_TAIL("pg(1)"));
+	exit(0);
 }
 
 static void __attribute__((__noreturn__)) needarg(const char *s)
 {
 	warnx(_("option requires an argument -- %s"), s);
-	usage(stderr);
+	errtryhelp(2);
 }
 
 static void __attribute__((__noreturn__)) invopt(const char *s)
 {
 	warnx(_("illegal option -- %s"), s);
-	usage(stderr);
+	errtryhelp(2);
 }
 
 #ifdef HAVE_WIDECHAR
@@ -651,7 +659,7 @@ static void prompt(long long pageno)
 					break;
 				case SEARCH_FIN:
 					state = SEARCH;
-					/* FALLTHRU */
+					/* fallthrough */
 				case SEARCH:
 					if (cmd.cmdline[cmd.cmdlen - 1] == '\\') {
 						escape = 1;
@@ -730,7 +738,7 @@ static void prompt(long long pageno)
 					continue;
 				}
 				state = COUNT;
-				/* FALLTHRU */
+				/* fallthrough */
 			case COUNT:
 				break;
 			case ADDON_FIN:
@@ -1559,7 +1567,7 @@ int main(int argc, char **argv)
 		argc--;
 
 		if (!strcmp(argv[arg], "--help")) {
-		    usage(stdout);
+		    usage();
 		}
 
 		if (!strcmp(argv[arg], "--version")) {
@@ -1615,7 +1623,7 @@ int main(int argc, char **argv)
 				sflag = 1;
 				break;
 			case 'h':
-				usage(stdout);
+				usage();
 			case 'V':
 				printf(UTIL_LINUX_VERSION);
 				return EXIT_SUCCESS;

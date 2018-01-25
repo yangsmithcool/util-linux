@@ -138,7 +138,7 @@ void prepare_line_buffer(void);
 
 static struct termios otty, savetty0;
 static long file_pos, file_size;
-static int fnum, no_intty, no_tty, slow_tty;
+static int fnum, no_intty, no_tty;
 static int dum_opt, dlines;
 static void onquit(int), onsusp(int), chgwinsz(int), end_it(int);
 static int nscroll = SCROLL_LEN;	/* Number of lines scrolled by 'd' */
@@ -190,7 +190,13 @@ static struct {
 } context, screen_start;
 extern char PC;			/* pad character */
 
-#include <term.h>		/* include after <curses.h> */
+#if defined(HAVE_NCURSESW_TERM_H)
+# include <ncursesw/term.h>
+#elif defined(HAVE_NCURSES_TERM_H)
+# include <ncurses/term.h>
+#elif defined(HAVE_TERM_H)
+# include <term.h>
+#endif
 
 #define TERM_AUTO_RIGHT_MARGIN    "am"
 #define TERM_CEOL                 "xhp"
@@ -219,8 +225,9 @@ static void putstring(char *s)
 	tputs(s, fileno(stdout), putchar);	/* putp(s); */
 }
 
-static void __attribute__((__noreturn__)) usage(FILE *out)
+static void __attribute__((__noreturn__)) usage(void)
 {
+	FILE *out = stdout;
 	fputs(USAGE_HEADER, out);
 	fprintf(out, _(" %s [options] <file>...\n"), program_invocation_short_name);
 
@@ -238,9 +245,12 @@ static void __attribute__((__noreturn__)) usage(FILE *out)
 	fputs(_(" -<number>   the number of lines per screenful\n"), out);
 	fputs(_(" +<number>   display file beginning from line number\n"), out);
 	fputs(_(" +/<string>  display file beginning from search string match\n"), out);
-	fputs(_(" -V          display version information and exit\n"), out);
-	fprintf(out, USAGE_MAN_TAIL("more(1)"));
-	exit(out == stderr ? EXIT_FAILURE : EXIT_SUCCESS);
+
+	fputs(USAGE_SEPARATOR, out);
+	printf( "     --help     %s\n", USAGE_OPTSTR_HELP);
+	printf( " -V, --version  %s\n", USAGE_OPTSTR_VERSION);
+	printf(USAGE_MAN_TAIL("more(1)"));
+	exit(EXIT_SUCCESS);
 }
 
 int main(int argc, char **argv)
@@ -260,6 +270,16 @@ int main(int argc, char **argv)
 	bindtextdomain(PACKAGE, LOCALEDIR);
 	textdomain(PACKAGE);
 	atexit(close_stdout);
+
+	if (argc > 1) {
+		/* first arg may be one of our standard longopts */
+		if (!strcmp(argv[1], "--help"))
+			usage();
+		if (!strcmp(argv[1], "--version")) {
+			printf(UTIL_LINUX_VERSION);
+			exit(EXIT_SUCCESS);
+		}
+	}
 
 	nfiles = argc;
 	fnames = argv;
@@ -313,9 +333,10 @@ int main(int argc, char **argv)
 	left = dlines;
 	if (nfiles > 1)
 		prnames++;
-	if (!no_intty && nfiles == 0)
-		usage(stderr);
-	else
+	if (!no_intty && nfiles == 0) {
+		warnx(_("bad usage"));
+		errtryhelp(EXIT_FAILURE);
+	} else
 		f = stdin;
 	if (!no_tty) {
 		signal(SIGQUIT, onquit);
@@ -482,7 +503,7 @@ void argscan(char *s)
 			break;
 		default:
 			warnx(_("unknown option -%s"), s);
-			usage(stderr);
+			errtryhelp(EXIT_FAILURE);
 			break;
 		}
 		s++;
@@ -1264,7 +1285,7 @@ int command(char *filename, register FILE *f)
 				break;
 			}
 			lastp++;
-			/* fall through */
+			/* fallthrough */
 		case '/':
 			if (nlines == 0)
 				nlines++;
@@ -1362,7 +1383,7 @@ int command(char *filename, register FILE *f)
 						(char *)0);
 				break;
 			}
-			/* fall through */
+			/* fallthrough */
 		default:
 			if (dum_opt) {
 				kill_line();
@@ -1812,7 +1833,6 @@ void initterm(void)
 	no_intty = tcgetattr(fileno(stdin), &otty);
 	tcgetattr(fileno(stderr), &otty);
 	savetty0 = otty;
-	slow_tty = cfgetispeed(&otty) < B1200;
 	hardtabs = (otty.c_oflag & TABDLY) != XTABS;
 	if (!no_tty) {
 		otty.c_lflag &= ~(ICANON | ECHO);
@@ -2017,6 +2037,7 @@ int expand(char **outbuf, char *inbuf)
 				*outstr++ = *inpstr++;
 				break;
 			}
+			/* fallthrough */
 		default:
 			*outstr++ = c;
 		}

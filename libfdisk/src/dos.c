@@ -212,8 +212,11 @@ static int get_partition_unused_primary(struct fdisk_context *cxt,
 	if (rc == 1) {
 		fdisk_info(cxt, _("All primary partitions have been defined already."));
 		rc = -1;
+	} else if (rc == -ERANGE) {
+		fdisk_warnx(cxt, _("Primary partition not available."));
 	} else if (rc == 0)
 		*partno = n;
+
 	return rc;
 }
 
@@ -398,7 +401,7 @@ static void reset_pte(struct pte *pe)
 	memset(pe, 0, sizeof(struct pte));
 }
 
-static int dos_delete_partition(struct fdisk_context *cxt, size_t partnum)
+static int delete_partition(struct fdisk_context *cxt, size_t partnum)
 {
 	struct fdisk_dos_label *l;
 	struct pte *pe;
@@ -494,6 +497,21 @@ static int dos_delete_partition(struct fdisk_context *cxt, size_t partnum)
 
 	fdisk_label_set_changed(cxt->label, 1);
 	return 0;
+}
+
+static int dos_delete_partition(struct fdisk_context *cxt, size_t partnum)
+{
+	struct pte *pe;
+
+	assert(cxt);
+	assert(cxt->label);
+	assert(fdisk_is_label(cxt, DOS));
+
+	pe = self_pte(cxt, partnum);
+	if (!pe || !is_used_partition(pe->pt_entry))
+		return -EINVAL;
+
+	return delete_partition(cxt, partnum);
 }
 
 static void read_extended(struct fdisk_context *cxt, size_t ext)
@@ -625,7 +643,7 @@ static void read_extended(struct fdisk_context *cxt, size_t ext)
 		if (p && !dos_partition_get_size(p) &&
 		    (cxt->label->nparts_max > 5 || (q && q->sys_ind))) {
 			fdisk_info(cxt, _("omitting empty partition (%zu)"), i+1);
-			dos_delete_partition(cxt, i);
+			delete_partition(cxt, i);
 			goto remove; 	/* numbering changed */
 		}
 	}
@@ -1178,7 +1196,7 @@ static int add_partition(struct fdisk_context *cxt, size_t n,
 	else if (pa && fdisk_partition_has_size(pa)) {
 		stop = start + pa->size;
 		isrel = pa->size_explicit ? 0 : 1;
-		if (!isrel && stop > start)
+		if ((!isrel || !alignment_required(cxt)) && stop > start)
 			stop -= 1;
 	} else {
 		/* ask user by dialog */
@@ -1224,7 +1242,7 @@ static int add_partition(struct fdisk_context *cxt, size_t n,
 		}
 	}
 
-	DBG(LABEL, ul_debug("DOS: raw stop: %ju", (uintmax_t) stop));
+	DBG(LABEL, ul_debug("DOS: raw stop: %ju [limit %ju]", (uintmax_t) stop, (uintmax_t) limit));
 
 	if (stop > limit)
 		stop = limit;
@@ -1234,7 +1252,7 @@ static int add_partition(struct fdisk_context *cxt, size_t n,
 		isrel = 0;
 		if (stop > start)
 			stop -= 1;
-		DBG(LABEL, ul_debug("DOS: don't align end os tiny partition [start=%ju, stop=%ju, grain=%lu]",
+		DBG(LABEL, ul_debug("DOS: don't align end of tiny partition [start=%ju, stop=%ju, grain=%lu]",
 			    (uintmax_t)start,  (uintmax_t)stop, cxt->grain));
 	}
 
@@ -1543,7 +1561,7 @@ static int dos_add_partition(struct fdisk_context *cxt,
 	int rc = 0;
 	struct fdisk_dos_label *l;
 	struct pte *ext_pe;
-	size_t res;		/* partno */
+	size_t res = 0;		/* partno */
 
 	assert(cxt);
 	assert(cxt->label);
@@ -1558,59 +1576,73 @@ static int dos_add_partition(struct fdisk_context *cxt,
 	 * partition template (@pa) based partitioning
 	 */
 
-	/* pa specifies start within extended partition, add logical */
+	/* A) template specifies start within extended partition; add logical */
 	if (pa && fdisk_partition_has_start(pa) && ext_pe
 	    && pa->start >= l->ext_offset
 	    && pa->start <= get_abs_partition_end(ext_pe)) {
-		DBG(LABEL, ul_debug("DOS: pa template %p: add logical", pa));
+		DBG(LABEL, ul_debug("DOS: pa template %p: add logical (by offset)", pa));
+
+		if (fdisk_partition_has_partno(pa) && fdisk_partition_get_partno(pa) < 4) {
+			DBG(LABEL, ul_debug("DOS: pa template specifies partno<4 for logical partition"));
+			return -EINVAL;
+		}
 		rc = add_logical(cxt, pa, &res);
 		goto done;
 
-	/* pa specifies that extended partition is wanted */
-	} else if (pa && pa->type && IS_EXTENDED(pa->type->code)) {
-		DBG(LABEL, ul_debug("DOS: pa template %p: add extended", pa));
-		if (l->ext_offset) {
+	/* B) template specifies start out of extended partition; add primary */
+	} else if (pa && fdisk_partition_has_start(pa) && ext_pe) {
+		DBG(LABEL, ul_debug("DOS: pa template %p: add primary (by offset)", pa));
+
+		if (fdisk_partition_has_partno(pa) && fdisk_partition_get_partno(pa) >= 4) {
+			DBG(LABEL, ul_debug("DOS: pa template specifies partno>=4 for primary partition"));
+			return -EINVAL;
+		}
+		if (ext_pe && pa->type && IS_EXTENDED(pa->type->code)) {
 			fdisk_warnx(cxt, _("Extended partition already exists."));
 			return -EINVAL;
 		}
 		rc = get_partition_unused_primary(cxt, pa, &res);
-		if (rc == 0) {
-			rc = add_partition(cxt, res, pa);
-			goto done;
-		}
-
-	/* pa specifies start, but outside extended partition */
-	} else if (pa && fdisk_partition_has_start(pa)) {
-		DBG(LABEL, ul_debug("DOS: pa template %p: add primary", pa));
-		rc = get_partition_unused_primary(cxt, pa, &res);
 		if (rc == 0)
 			rc = add_partition(cxt, res, pa);
 		goto done;
 
-	/* pa follows default, but partno < 4, it means primary partition */
-	} else if (pa && fdisk_partition_start_is_default(pa)
+	/* C) template specifies start (or default), partno < 4; add primary */
+	} else if (pa && (fdisk_partition_start_is_default(pa) || fdisk_partition_has_start(pa))
 		   && fdisk_partition_has_partno(pa)
-		    && pa->partno < 4) {
-		DBG(LABEL, ul_debug("DOS: pa template %p: add primary (partno < 4)", pa));
+		   && pa->partno < 4) {
+		DBG(LABEL, ul_debug("DOS: pa template %p: add primary (by partno)", pa));
+
+		if (ext_pe && pa->type && IS_EXTENDED(pa->type->code)) {
+			fdisk_warnx(cxt, _("Extended partition already exists."));
+			return -EINVAL;
+		}
 		rc = get_partition_unused_primary(cxt, pa, &res);
 		if (rc == 0)
 			rc = add_partition(cxt, res, pa);
 		goto done;
 
-	/* pa follows default, but partno >= 4, it means logical partition */
-	} else if (pa && fdisk_partition_start_is_default(pa)
-		   && ext_pe
+	/* D) template specifies start (or default), partno >= 4; add logical */
+	} else if (pa && (fdisk_partition_start_is_default(pa) || fdisk_partition_has_start(pa))
 		   && fdisk_partition_has_partno(pa)
 		   && pa->partno >= 4) {
-		DBG(LABEL, ul_debug("DOS: pa template %p: add logical (partno >= 4)", pa));
+		DBG(LABEL, ul_debug("DOS: pa template %p: add logical (by partno)", pa));
+
+		if (!ext_pe) {
+			fdisk_warnx(cxt, _("Extended partition does not exists. Failed to add logical partition."));
+			return -EINVAL;
+		} else if (fdisk_partition_has_start(pa)
+			   && pa->start < l->ext_offset
+			   && pa->start > get_abs_partition_end(ext_pe)) {
+			DBG(LABEL, ul_debug("DOS: pa template specifies partno>=4, but start out of extended"));
+			return -EINVAL;
+		}
+
 		rc = add_logical(cxt, pa, &res);
 		goto done;
 	}
 
-	/*
-	 * dialog driven partitioning (it does not mean that @pa template is
-	 * completely ignored!)
-	 */
+	DBG(LABEL, ul_debug("DOS: dialog driven partitioning"));
+	/* Note @pa may be still used for things like partition type, etc */
 
 	/* check if there is space for primary partition */
 	grain = cxt->grain > cxt->sector_size ? cxt->grain / cxt->sector_size : 1;
@@ -1642,6 +1674,8 @@ static int dos_add_partition(struct fdisk_context *cxt,
 		DBG(LABEL, ul_debug("DOS: primary impossible, add logical"));
 		if (l->ext_offset) {
 			if (!pa || fdisk_partition_has_start(pa)) {
+				/* See above case A); here we have start, but
+				 * out of extended partition */
 				const char *msg;
 				if (!free_primary)
 					msg = _("All primary partitions are in use.");
@@ -1676,7 +1710,7 @@ static int dos_add_partition(struct fdisk_context *cxt,
 		int c;
 
 		/* the default layout for scripts is to create primary partitions */
-		if (cxt->script) {
+		if (cxt->script || !fdisk_has_dialogs(cxt)) {
 			rc = get_partition_unused_primary(cxt, pa, &res);
 			if (rc == 0)
 				rc = add_partition(cxt, res, pa);
@@ -1703,10 +1737,11 @@ static int dos_add_partition(struct fdisk_context *cxt,
 			fdisk_ask_menu_add_item(ask, 'l', _("logical"), _("numbered from 5"));
 
 		rc = fdisk_do_ask(cxt, ask);
+		if (!rc)
+			fdisk_ask_menu_get_result(ask, &c);
+		fdisk_unref_ask(ask);
 		if (rc)
 			return rc;
-		fdisk_ask_menu_get_result(ask, &c);
-		fdisk_unref_ask(ask);
 
 		if (c == 'p') {
 			rc = get_partition_unused_primary(cxt, pa, &res);
@@ -2449,6 +2484,14 @@ struct fdisk_label *fdisk_new_dos_label(struct fdisk_context *cxt)
 	lb->nparttypes = ARRAY_SIZE(dos_parttypes) - 1;
 	lb->fields = dos_fields;
 	lb->nfields = ARRAY_SIZE(dos_fields);
+
+	lb->geom_min.sectors = 1;
+	lb->geom_min.heads = 1;
+	lb->geom_min.cylinders = 1;
+
+	lb->geom_max.sectors = 63;
+	lb->geom_max.heads = 255;
+	lb->geom_max.cylinders = 1048576;
 
 	return lb;
 }
